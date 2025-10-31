@@ -1,20 +1,17 @@
-FROM python:3.11-slim
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Use the official lightweight Python image
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy dependency definitions and install
-COPY requirements.txt ./
+# Copy dependency file first for caching
+COPY requirements.txt .
+
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
-COPY dedupe_pipeline.py ./
-COPY main.py ./
+# Copy all your project files
+COPY . .
 
 # Default environment variables (can be overridden at runtime)
 ENV SOURCE_TABLE=practice_records \
@@ -23,5 +20,5 @@ ENV SOURCE_TABLE=practice_records \
     THRESHOLD=90 \
     BATCH_SIZE=5000
 
-# Define the entrypoint for Railway scheduled runs
+# Run your main script
 CMD ["python", "main.py"]
