@@ -1,0 +1,10 @@
+# Requirements for the deduplication pipeline
+#
+# This file lists the Python packages that must be installed for
+# `dedupe_pipeline.py` to run.  When deploying to Railway or another
+# containerized platform, the build process should run `pip install -r
+# requirements.txt`.
+
+pandas
+fuzzywuzzy[speedup]  # includes python-Levenshtein for performance
+requests
