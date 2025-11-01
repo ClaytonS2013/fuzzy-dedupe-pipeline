@@ -22,3 +22,4 @@ ENV SOURCE_TABLE=practice_records \
 
 # Run your main script
 CMD ["python", "main.py"]
+
