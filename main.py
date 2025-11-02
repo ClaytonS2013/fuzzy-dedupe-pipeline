@@ -229,8 +229,8 @@ def main() -> None:
 
     # Deduplicate
     cleaned_df, cluster_series = dedupe_records(df, threshold=threshold)
-            print(
-            f"Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
+        print(
+        f"Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
             flush=True,
         )
         # Persist cleaned records
