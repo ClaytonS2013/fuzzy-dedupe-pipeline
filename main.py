@@ -229,18 +229,13 @@ def main() -> None:
 
     # Deduplicate
     cleaned_df, cluster_series = dedupe_records(df, threshold=threshold)
-        print(
-        f"Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
-            flush=True,
-        )
-        # Persist cleaned records
-        # Remove 'address' column before writing results if present
+        print(f"Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records", flush=True)
+   # Remove 'address' column before writing results if present
         cleaned_df = cleaned_df.drop(columns=['address'], errors='ignore')
         records_to_write = cleaned_df.to_dict(orient="records")
         upsert_supabase_rows(supabase_url, supabase_key, results_table, records_to_write)
-        print(
-            f"Uploaded deduped records to {results_table}",
-            flush=True,
+        print(f"Uploaded deduped records to {results_table}", flush=True)
+       f
         
    
   
