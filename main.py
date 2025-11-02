@@ -20,7 +20,7 @@ Required environment variables
 SUPABASE_URL           # e.g. https://myproj.supabase.co
 SUPABASE_SERVICE_KEY   # service role key with read/write permissions
 SOURCE_TABLE           # table to read raw records from (default: practice_records)
-RESULTS_TABLE          # table to write deduped results (default: dedupe_results)
+RESULTS_TALE          # table to write deduped results (default: dedupe_results)
 LOG_TABLE              # table to log run metadata (default: dedupe_log)
 THRESHOLD              # fuzziness threshold for names (default: 90)
 BATCH_SIZE             # fetch batch size for Supabase paging (default: 5000)
