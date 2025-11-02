@@ -235,11 +235,12 @@ def main() -> None:
 
     # Persist cleaned records
         # Remove 'address' column before writing results if present
-if '    address' in cleaned_df.columns:
-        cleaned_df = cleaned_df.drop(columns=['address'])
+    
+        cleaned_df = cleaned_df.drop(columns=['address'], errors='ignore')
+                        records_to_write = cleaned_df.to_dict(orient="records")
 
-    records_to_write = cleaned_df.to_dict(orient="records")
-    upsert_supabase_rows(supabase_url, supabase_key, results_table, records_to_write)
+        upsert_supabase_rows(supabase_url, supabase_key, results_table, records_to_write)
+
     print(f"Uploaded deduped records to {results_table}", flush=True)
 
     # Log the run
