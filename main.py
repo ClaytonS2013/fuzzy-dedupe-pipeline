@@ -235,7 +235,7 @@ def main() -> None:
         records_to_write = cleaned_df.to_dict(orient="records")
         upsert_supabase_rows(supabase_url, supabase_key, results_table, records_to_write)
         print(f"Uploaded deduped records to {results_table}", flush=True)
-       f
+    
         
    
   
