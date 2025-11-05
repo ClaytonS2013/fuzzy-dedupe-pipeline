@@ -13,12 +13,12 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
-COPY . .
+COPY main.py ./
 
 # Set default environment variables
 ENV SOURCE_TABLE=practice_records \
