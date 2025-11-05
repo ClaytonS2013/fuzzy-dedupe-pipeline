@@ -15,7 +15,6 @@ the same code can be reused in different environments without modification.
 
 Required environment variables
 -----------------------------
-
 ```
 SUPABASE_URL           # e.g. https://myproj.supabase.co
 SUPABASE_SERVICE_KEY   # service role key with read/write permissions
@@ -52,7 +51,6 @@ from fuzzywuzzy import fuzz
 # dependencies. See the `seed_synthetic_rows` function below for the
 # sample data.
 SMOKE: bool = os.getenv("SMOKE_TEST", "0") == "1"
-
 
 
 def get_env(name: str, default: str | None = None) -> str:
@@ -147,6 +145,9 @@ def fetch_supabase_table(api_url: str, api_key: str, table: str, batch_size: int
     }
     all_rows: List[Dict[str, object]] = []
     range_start = 0
+    
+    print(f"📥 Fetching from {table}...", flush=True)
+    
     while True:
         range_end = range_start + batch_size - 1
         range_header = {"Range": f"{range_start}-{range_end}"}
@@ -159,35 +160,84 @@ def fetch_supabase_table(api_url: str, api_key: str, table: str, batch_size: int
         if not rows:
             break
         all_rows.extend(rows)
+        print(f"  Fetched {len(all_rows)} rows so far...", flush=True)
         # If fewer rows than requested were returned then we've reached the end
         if len(rows) < batch_size:
             break
         range_start += batch_size
+    
+    print(f"✅ Total fetched: {len(all_rows)} rows", flush=True)
     return all_rows
 
 
 def upsert_supabase_rows(api_url: str, api_key: str, table: str, rows: Sequence[Dict[str, object]]):
     """
-    Upsert a list of dictionaries into a Supabase table.
+    Upsert a list of dictionaries into a Supabase table with improved error handling.
 
     The table should define a primary key or unique constraint for idempotent behaviour.
-    This function returns the JSON response from Supabase if available.
+    This function handles bulk upserts and falls back to individual records if needed.
     """
     if not rows:
+        print("No records to write", flush=True)
         return None
+    
     url = f"{api_url}/rest/v1/{table}"
     headers = {
         "apikey": api_key,
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",
+        "Prefer": "resolution=merge-duplicates",
     }
-    response = requests.post(url, headers=headers, data=json.dumps(rows))
-    if response.status_code not in (201, 200, 204):
-        raise RuntimeError(
-            f"Failed to upsert rows: HTTP {response.status_code} – {response.text}"
-        )
-    return response.json() if response.content else None
+    
+    print(f"📤 Attempting to upsert {len(rows)} records to {table}...", flush=True)
+    
+    try:
+        # Try bulk upsert first
+        response = requests.post(url, headers=headers, data=json.dumps(list(rows)))
+        
+        if response.status_code in (201, 200, 204):
+            print(f"✅ Successfully upserted {len(rows)} records", flush=True)
+            return response.json() if response.content else None
+        else:
+            print(f"⚠️ Bulk upsert failed: HTTP {response.status_code} – {response.text}", flush=True)
+            raise RuntimeError(f"Bulk upsert failed: {response.status_code}")
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"⚠️ Bulk upsert failed: {error_msg}", flush=True)
+        print(f"🔄 Falling back to individual record upserts...", flush=True)
+        
+        # Fallback: upsert records one by one
+        success_count = 0
+        failed_records = []
+        
+        for idx, record in enumerate(rows):
+            try:
+                response = requests.post(url, headers=headers, data=json.dumps([record]))
+                
+                if response.status_code in (201, 200, 204):
+                    success_count += 1
+                    if (idx + 1) % 100 == 0:
+                        print(f"  Progress: {idx + 1}/{len(rows)} ({success_count} succeeded)", flush=True)
+                else:
+                    failed_records.append((idx, record, f"HTTP {response.status_code}"))
+                    
+            except Exception as e:
+                failed_records.append((idx, record, str(e)))
+        
+        print(f"\n📊 Individual upsert results:", flush=True)
+        print(f"  ✅ Success: {success_count}/{len(rows)}", flush=True)
+        print(f"  ❌ Failed: {len(failed_records)} records", flush=True)
+        
+        if failed_records:
+            print(f"\n⚠️ Failed records (first 5):", flush=True)
+            for idx, record, error in failed_records[:5]:
+                print(f"  Record {idx}: {error}", flush=True)
+        
+        if success_count == 0:
+            raise RuntimeError("All upserts failed - check table schema and permissions")
+        
+        return None
 
 
 def block_dataframe(df: pd.DataFrame, column: str) -> Dict[str, List[int]]:
@@ -259,19 +309,32 @@ def dedupe_records(df: pd.DataFrame, threshold: int) -> Tuple[pd.DataFrame, pd.S
     Returns a deduped DataFrame and a Series mapping each original index to a
     cluster identifier.  The cluster mapping can be persisted for auditing.
     """
+    print(f"🔍 Starting deduplication with threshold={threshold}...", flush=True)
+    
     blocks = block_dataframe(df, column="practice_name")
+    print(f"  Created {len(blocks)} blocks for processing", flush=True)
+    
     clusters: List[List[int]] = []
-    for indices in blocks.values():
-        clusters.extend(fuzzy_cluster(indices, df, threshold))
+    for block_key, indices in blocks.items():
+        block_clusters = fuzzy_cluster(indices, df, threshold)
+        clusters.extend(block_clusters)
+    
+    print(f"  Identified {len(clusters)} clusters", flush=True)
+    
     cluster_ids: Dict[int, int] = {}
     for cid, cluster in enumerate(clusters, start=1):
         for idx in cluster:
             cluster_ids[idx] = cid
+    
     cleaned_records: List[Dict[str, object]] = []
     for cluster in clusters:
         cleaned_records.append(pick_representative(cluster, df))
+    
     cleaned_df = pd.DataFrame(cleaned_records)
     cluster_series = pd.Series(cluster_ids)
+    
+    print(f"✅ Deduplication complete: {len(df)} → {len(cleaned_df)} records", flush=True)
+    
     return cleaned_df, cluster_series
 
 
@@ -289,6 +352,11 @@ def log_run(api_url: str, api_key: str, table: str, *, start_time: float, num_ra
 def main() -> None:
     """Entrypoint for the deduplication job."""
     start_ts = time.time()
+    
+    print("\n" + "="*60, flush=True)
+    print("🚀 FUZZY DEDUPLICATION PIPELINE STARTING", flush=True)
+    print("="*60 + "\n", flush=True)
+    
     # Read threshold and batch size first; these apply in both smoke and production modes.
     threshold = int(get_env("THRESHOLD", "90"))
     batch_size = int(get_env("BATCH_SIZE", "5000"))
@@ -305,7 +373,7 @@ def main() -> None:
             f"[SMOKE] Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
             flush=True,
         )
-        print("PIPELINE Complete", flush=True)
+        print("\n✅ SMOKE TEST COMPLETE\n", flush=True)
         return
 
     # In production mode, fetch required Supabase environment variables.
@@ -316,39 +384,38 @@ def main() -> None:
     log_table = get_env("LOG_TABLE", "dedupe_log")
 
     # Print configuration for observability
-    print(
-        f"\n>>> Starting deduplication job at {datetime.utcnow().isoformat()}Z",
-        flush=True,
-    )
-    print(
-        f"Configuration: source={source_table}, results={results_table}, log={log_table}, threshold={threshold}, batch_size={batch_size}",
-        flush=True,
-    )
-
+    print(f"⏰ Started at: {datetime.utcnow().isoformat()}Z", flush=True)
+    print(f"📋 Configuration:", flush=True)
+    print(f"   Source table: {source_table}", flush=True)
+    print(f"   Results table: {results_table}", flush=True)
+    print(f"   Log table: {log_table}", flush=True)
+    print(f"   Threshold: {threshold}", flush=True)
+    print(f"   Batch size: {batch_size}\n", flush=True)
 
     # Pull raw records from Supabase
     rows = fetch_supabase_table(supabase_url, supabase_key, source_table, batch_size)
     if not rows:
-        print("No records found; job exiting.", flush=True)
+        print("⚠️ No records found; job exiting.\n", flush=True)
         return
+    
     df = pd.DataFrame(rows)
-    print(f"Fetched {len(df)} records from Supabase", flush=True)
+    print(f"✅ Loaded {len(df)} records into DataFrame\n", flush=True)
 
     # Deduplicate
     cleaned_df, cluster_series = dedupe_records(df, threshold=threshold)
-    print(
-        f"Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
-        flush=True,
-    )
 
-    # Remove 'address' column before writing results if present
-    cleaned_df = cleaned_df.drop(columns=["address", "city", "external_id"], errors="ignore")
+    # Remove specified columns before writing results
+    columns_to_drop = ["address", "city", "external_id"]
+    cleaned_df = cleaned_df.drop(columns=[col for col in columns_to_drop if col in cleaned_df.columns], errors="ignore")
+    
+    print(f"\n📝 Preparing {len(cleaned_df)} records for upload...", flush=True)
     records_to_write = cleaned_df.to_dict(orient="records")
+    
     upsert_supabase_rows(supabase_url, supabase_key, results_table, records_to_write)
-    print(f"Uploaded deduped records to {results_table}", flush=True)
 
     # Log the run
     try:
+        print(f"\n📊 Logging run details to {log_table}...", flush=True)
         log_run(
             supabase_url,
             supabase_key,
@@ -358,14 +425,16 @@ def main() -> None:
             num_clusters=cluster_series.nunique(),
             num_clean=len(cleaned_df),
         )
-        print(f"Logged run details to {log_table}", flush=True)
+        print(f"✅ Run details logged successfully", flush=True)
     except Exception as e:
-        print(f"Warning: failed to log run details: {e}", file=sys.stderr)
+        print(f"⚠️ Warning: failed to log run details: {e}", file=sys.stderr, flush=True)
 
-    print(
-        f"Deduplication job complete at {datetime.utcnow().isoformat()}Z",
-        flush=True,
-    )
+    elapsed = time.time() - start_ts
+    print("\n" + "="*60, flush=True)
+    print(f"✅ PIPELINE COMPLETE", flush=True)
+    print(f"⏱️  Total time: {elapsed:.2f} seconds", flush=True)
+    print(f"📈 Reduced {len(df)} → {len(cleaned_df)} records ({len(cluster_series.nunique())} clusters)", flush=True)
+    print("="*60 + "\n", flush=True)
 
 
 if __name__ == "__main__":
