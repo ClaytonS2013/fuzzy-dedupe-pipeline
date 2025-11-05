@@ -369,8 +369,9 @@ def main() -> None:
         df = pd.DataFrame(synthetic_rows)
         print(f"[SMOKE] Seeded {len(df)} synthetic rows", flush=True)
         cleaned_df, cluster_series = dedupe_records(df, threshold=threshold)
+        num_clusters = cluster_series.nunique()
         print(
-            f"[SMOKE] Identified {cluster_series.nunique()} clusters; writing {len(cleaned_df)} unique records",
+            f"[SMOKE] Identified {num_clusters} clusters; writing {len(cleaned_df)} unique records",
             flush=True,
         )
         print("\n✅ SMOKE TEST COMPLETE\n", flush=True)
@@ -403,6 +404,7 @@ def main() -> None:
 
     # Deduplicate
     cleaned_df, cluster_series = dedupe_records(df, threshold=threshold)
+    num_clusters = cluster_series.nunique()
 
     # Remove specified columns before writing results
     columns_to_drop = ["address", "city", "external_id"]
@@ -422,7 +424,7 @@ def main() -> None:
             log_table,
             start_time=start_ts,
             num_raw=len(df),
-            num_clusters=cluster_series.nunique(),
+            num_clusters=num_clusters,
             num_clean=len(cleaned_df),
         )
         print(f"✅ Run details logged successfully", flush=True)
@@ -433,7 +435,7 @@ def main() -> None:
     print("\n" + "="*60, flush=True)
     print(f"✅ PIPELINE COMPLETE", flush=True)
     print(f"⏱️  Total time: {elapsed:.2f} seconds", flush=True)
-    print(f"📈 Reduced {len(df)} → {len(cleaned_df)} records ({len(cluster_series.nunique())} clusters)", flush=True)
+    print(f"📈 Reduced {len(df)} → {len(cleaned_df)} records ({num_clusters} clusters)", flush=True)
     print("="*60 + "\n", flush=True)
 
 
