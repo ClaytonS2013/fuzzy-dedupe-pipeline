@@ -1,25 +1,31 @@
-# Use the official lightweight Python image
+# Use Python 3.10 slim as a base image
 FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy dependency file first for caching
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy all your project files
+# Copy the application code
 COPY . .
 
-# Default environment variables (can be overridden at runtime)
+# Set default environment variables
 ENV SOURCE_TABLE=practice_records \
     RESULTS_TABLE=dedupe_results \
     LOG_TABLE=dedupe_log \
     THRESHOLD=90 \
     BATCH_SIZE=5000
 
-# Run your main script
+# Run the application
 CMD ["python", "main.py"]
-
