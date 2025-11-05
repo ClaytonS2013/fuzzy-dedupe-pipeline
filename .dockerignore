@@ -1,0 +1,10 @@
+# Prevent unnecessary files from being copied to Docker image
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.git/
+.gitignore
+README.md
+.DS_Store
+*.log
