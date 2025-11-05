@@ -1,6 +1,6 @@
 pandas>=2.0.0
 requests>=2.31.0
-python-fuzzywuzzy>=0.18.0
+fuzzywuzzy>=0.18.0
 python-Levenshtein>=0.21.0
 openai>=1.43.0
 anthropic>=0.18.0
