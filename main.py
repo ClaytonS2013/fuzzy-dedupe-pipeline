@@ -618,4 +618,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+  
+        # Run Google Sheets to Supabase sync before dedupe
+    import subprocess
+    try:
+        subprocess.run(["python", "sheets_sync/main.py", "--run-now"], check=True)
+    except Exception as e:
+        print(f"Error running sheets_sync: {e}", flush=True)
     main()
+
+
