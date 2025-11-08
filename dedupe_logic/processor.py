@@ -1,6 +1,6 @@
 """
 AI-Enhanced Fuzzy Matching Processor for Veterinary Practice Deduplication
-Now with Claude Sonnet 3.5 for intelligent validation
+Integrates: Traditional Fuzzy Matching + AI Embeddings + ML Models + Claude Validation
 """
 
 import os
@@ -14,9 +14,23 @@ from difflib import SequenceMatcher
 from collections import defaultdict, Counter
 from datetime import datetime
 
-# [Previous imports remain the same...]
+# AI/ML imports with graceful fallbacks
+try:
+    from sentence_transformers import SentenceTransformer
+    import faiss
+    AI_EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    AI_EMBEDDINGS_AVAILABLE = False
+    print("⚠️ Sentence transformers not installed. Run: pip install sentence-transformers faiss-cpu")
 
-# Replace the OpenAI import with Anthropic
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import train_test_split
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
+    print("⚠️ Scikit-learn not installed. Run: pip install scikit-learn")
+
 try:
     from anthropic import Anthropic
     LLM_AVAILABLE = True
@@ -24,236 +38,302 @@ except ImportError:
     LLM_AVAILABLE = False
     print("⚠️ Anthropic not installed. Run: pip install anthropic")
 
+logger = logging.getLogger(__name__)
+
 # ============================================
-# PART 4: CLAUDE SONNET 3.5 VALIDATION
+# CONFIGURATION
 # ============================================
 
-class ClaudeLLMValidator:
-    """Claude Sonnet 3.5 validation for complex deduplication cases"""
+THRESHOLDS = {
+    'high_confidence': float(os.environ.get('THRESHOLD', 85)) / 100,
+    'medium_confidence': 0.75,
+    'low_confidence': 0.50,
+    'phone_match_boost': 0.15,
+    'address_match_boost': 0.10
+}
+
+COMMON_WORDS = {
+    'veterinary', 'vet', 'animal', 'hospital', 'clinic',
+    'pet', 'care', 'center', 'medical', 'health',
+    'associates', 'group', 'services', 'practice', 'llc',
+    'inc', 'corp', 'company', 'the', 'and', 'of'
+}
+
+# ============================================
+# UTILITY FUNCTIONS
+# ============================================
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison"""
+    if not text:
+        return ""
+    text = str(text).lower().strip()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+def normalize_phone(phone: str) -> str:
+    """Normalize phone number for comparison"""
+    if not phone:
+        return ""
+    return re.sub(r'\D', '', str(phone))
+
+def normalize_address(address: str) -> str:
+    """Normalize address for comparison"""
+    if not address:
+        return ""
     
-    def __init__(self):
-        self.api_key = os.environ.get('ANTHROPIC_API_KEY')
-        if self.api_key and LLM_AVAILABLE:
-            self.client = Anthropic(api_key=self.api_key)
-            self.enabled = True
-            self.model = "claude-3-5-sonnet-20241022"  # Latest Sonnet 3.5
-            logger.info("✅ Claude Sonnet 3.5 validation enabled")
-        else:
-            self.enabled = False
-            logger.info("ℹ️ Claude validation not configured (set ANTHROPIC_API_KEY)")
+    address = str(address).lower().strip()
+    replacements = {
+        'street': 'st', 'avenue': 'ave', 'road': 'rd',
+        'boulevard': 'blvd', 'drive': 'dr', 'court': 'ct',
+        'place': 'pl', 'lane': 'ln', 'suite': 'ste',
+        'north': 'n', 'south': 's', 'east': 'e', 'west': 'w'
+    }
     
-    def validate_match(self, record1: dict, record2: dict, current_score: float) -> dict:
-        """Use Claude to validate a potential match with nuanced understanding"""
-        if not self.enabled:
-            return {'use_llm': False}
-        
-        # Only use Claude for uncertain cases (0.5 to 0.85 confidence)
-        if current_score < 0.5 or current_score > 0.85:
-            return {'use_llm': False}
-        
-        # Create a detailed prompt for Claude
-        prompt = f"""You are an expert at identifying duplicate veterinary practice records. Analyze these two records carefully:
-
-Practice 1:
-- Name: {record1.get('practice_name', 'Not provided')}
-- Phone: {record1.get('phone', 'Not provided')}
-- Address: {record1.get('address', 'Not provided')}
-- City: {record1.get('city', 'Not provided')}
-- State: {record1.get('state', 'Not provided')}
-- Email: {record1.get('email', 'Not provided')}
-- Website: {record1.get('website', 'Not provided')}
-
-Practice 2:
-- Name: {record2.get('practice_name', 'Not provided')}
-- Phone: {record2.get('phone', 'Not provided')}
-- Address: {record2.get('address', 'Not provided')}
-- City: {record2.get('city', 'Not provided')}
-- State: {record2.get('state', 'Not provided')}
-- Email: {record2.get('email', 'Not provided')}
-- Website: {record2.get('website', 'Not provided')}
-
-Current fuzzy match score: {current_score:.2%}
-
-Consider these factors:
-1. Common veterinary practice name variations (e.g., "Vet" vs "Veterinary", "Animal Hospital" vs "Pet Clinic")
-2. Chain locations or franchises that share names but are different locations
-3. Practice acquisitions or name changes
-4. Common abbreviations and acronyms
-5. Parent/subsidiary relationships
-6. Mobile vs physical locations
-7. Emergency vs regular practice locations
-
-Respond with ONLY a valid JSON object (no markdown, no explanation outside JSON):
-{{"is_duplicate": true_or_false, "confidence": 0.0_to_1.0, "relationship": "same_entity|different_locations|parent_subsidiary|completely_different|name_change", "reasoning": "brief explanation"}}"""
-        
-        try:
-            # Call Claude API
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=200,
-                temperature=0.1,  # Low temperature for consistency
-                system="You are a data deduplication expert specializing in veterinary practice records. Always respond with valid JSON only.",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            )
-            
-            # Parse Claude's response
-            response_text = response.content[0].text.strip()
-            
-            # Clean up response if it has markdown
-            if response_text.startswith('```'):
-                response_text = response_text.split('```')[1]
-                if response_text.startswith('json'):
-                    response_text = response_text[4:]
-            response_text = response_text.strip()
-            
-            result = json.loads(response_text)
-            result['use_llm'] = True
-            result['model'] = 'claude-3.5-sonnet'
-            
-            logger.info(f"🤖 Claude validation: {result['relationship']} (confidence: {result['confidence']:.2%})")
-            
-            return result
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse Claude response: {e}")
-            logger.debug(f"Raw response: {response_text}")
-            return {'use_llm': False, 'error': 'json_parse_error'}
-        except Exception as e:
-            logger.warning(f"Claude validation failed: {e}")
-            return {'use_llm': False, 'error': str(e)}
+    for full, abbr in replacements.items():
+        address = address.replace(full, abbr)
     
-    def validate_batch(self, matches: List[dict], max_validations: int = 20) -> List[dict]:
-        """Validate multiple matches efficiently with rate limiting"""
-        if not self.enabled:
-            return matches
-        
-        validated_count = 0
-        
-        for match in matches:
-            # Only validate uncertain matches
-            if 0.5 < match.get('combined_score', 0) < 0.85:
-                if validated_count >= max_validations:
-                    logger.info(f"⚠️ Reached max validations limit ({max_validations})")
-                    break
-                
-                llm_result = self.validate_match(
-                    match['record1'],
-                    match['record2'],
-                    match.get('combined_score', 0)
-                )
-                
-                if llm_result.get('use_llm'):
-                    match['llm_validation'] = llm_result
-                    match['llm_confidence'] = llm_result['confidence']
-                    match['llm_reasoning'] = llm_result.get('reasoning', '')
-                    match['relationship_type'] = llm_result.get('relationship', 'unknown')
-                    validated_count += 1
-        
-        logger.info(f"✅ Validated {validated_count} matches with Claude")
-        return matches
+    address = re.sub(r'[^\w\s]', ' ', address)
+    address = re.sub(r'\s+', ' ', address)
+    return address
+
+def calculate_similarity(str1: str, str2: str) -> float:
+    """Calculate similarity between two strings"""
+    if not str1 or not str2:
+        return 0.0
+    return SequenceMatcher(None, str1, str2).ratio()
+
+def extract_tokens(text: str, remove_common: bool = True) -> set:
+    """Extract meaningful tokens from text"""
+    if not text:
+        return set()
+    
+    tokens = set(text.lower().split())
+    
+    if remove_common:
+        tokens = tokens - COMMON_WORDS
+    
+    return tokens
 
 # ============================================
-# ENHANCED MAIN DEDUPLICATOR CLASS
+# TRADITIONAL FUZZY MATCHING
 # ============================================
 
-class AIEnhancedDeduplicator:
-    """Main class that integrates all deduplication methods including Claude"""
-    
-    def __init__(self):
-        self.embedding_matcher = AIEmbeddingMatcher() if AI_EMBEDDINGS_AVAILABLE else None
-        self.ml_predictor = MLDuplicatePredictor() if ML_AVAILABLE else None
-        self.llm_validator = ClaudeLLMValidator() if LLM_AVAILABLE else None  # Now using Claude
-        
-        # Adjusted weights with Claude's superior understanding
-        self.weights = {
-            'fuzzy': 0.25,
-            'semantic': 0.25,
-            'ml': 0.20,
-            'llm': 0.30  # Higher weight for Claude's nuanced understanding
-        }
-    
-    def find_all_duplicates(self, records: List[dict]) -> List[dict]:
-        """Find duplicates using all available methods including Claude validation"""
-        all_matches = {}
-        
-        logger.info("🔍 Starting AI-enhanced deduplication with Claude...")
-        
-        # [Previous matching logic remains the same...]
-        
-        # Claude validation for uncertain cases
-        if self.llm_validator:
-            uncertain_matches = [
-                m for m in all_matches.values() 
-                if 0.5 < m.get('combined_score', 0) < 0.85
-            ]
-            
-            if uncertain_matches:
-                logger.info(f"🤖 Sending {len(uncertain_matches)} uncertain matches to Claude...")
-                
-                for match in uncertain_matches:
-                    llm_result = self.llm_validator.validate_match(
-                        match['record1'], 
-                        match['record2'], 
-                        match['combined_score']
-                    )
-                    
-                    if llm_result.get('use_llm'):
-                        # Update scores with Claude's assessment
-                        match['scores']['llm'] = llm_result['confidence']
-                        match['llm_reasoning'] = llm_result.get('reasoning', '')
-                        match['relationship_type'] = llm_result.get('relationship', 'unknown')
-                        
-                        # Recalculate combined score with Claude's input
-                        match['combined_score'] = self._calculate_combined_score(match['scores'])
-                        
-                        # Claude can override if very confident
-                        if llm_result['confidence'] > 0.9:
-                            match['is_duplicate'] = llm_result['is_duplicate']
-                            match['override_reason'] = 'claude_high_confidence'
-        
-        # [Rest of the method remains the same...]
-        
-        return final_matches
-
-# ============================================
-# USAGE STATISTICS TRACKER
-# ============================================
-
-class DeduplicationStats:
-    """Track and report deduplication statistics"""
+class TraditionalFuzzyMatcher:
+    """Traditional fuzzy matching methods"""
     
     @staticmethod
-    def generate_report(matches: List[dict], records_count: int) -> dict:
-        """Generate comprehensive statistics report"""
+    def calculate_match_score(record1: dict, record2: dict) -> dict:
+        """Calculate various similarity scores"""
         
-        duplicates = [m for m in matches if m.get('is_duplicate')]
-        claude_validated = [m for m in matches if m.get('llm_validation')]
+        # Name similarity
+        name1 = normalize_text(record1.get('practice_name', ''))
+        name2 = normalize_text(record2.get('practice_name', ''))
+        name_similarity = calculate_similarity(name1, name2)
         
-        report = {
-            'timestamp': datetime.now().isoformat(),
-            'total_records': records_count,
-            'duplicate_pairs_found': len(duplicates),
-            'ai_features_used': {
-                'fuzzy_matching': True,
-                'semantic_embeddings': any('semantic' in m.get('scores', {}) for m in matches),
-                'ml_model': any('ml' in m.get('scores', {}) for m in matches),
-                'claude_validation': len(claude_validated) > 0
-            },
-            'claude_statistics': {
-                'validations_performed': len(claude_validated),
-                'high_confidence_overrides': sum(1 for m in claude_validated if m.get('override_reason') == 'claude_high_confidence'),
-                'relationship_types': Counter([m.get('relationship_type', 'unknown') for m in claude_validated])
-            },
-            'confidence_distribution': {
-                'high_90_100': sum(1 for m in duplicates if m.get('combined_score', 0) >= 0.9),
-                'medium_75_90': sum(1 for m in duplicates if 0.75 <= m.get('combined_score', 0) < 0.9),
-                'low_50_75': sum(1 for m in duplicates if 0.5 <= m.get('combined_score', 0) < 0.75)
-            }
+        # Token similarity
+        tokens1 = extract_tokens(name1)
+        tokens2 = extract_tokens(name2)
+        token_overlap = len(tokens1 & tokens2) / max(len(tokens1 | tokens2), 1)
+        
+        # Phone match
+        phone1 = normalize_phone(record1.get('phone', ''))
+        phone2 = normalize_phone(record2.get('phone', ''))
+        phone_match = 1.0 if phone1 and phone1 == phone2 else 0.0
+        
+        # Address similarity
+        addr1 = normalize_address(record1.get('address', ''))
+        addr2 = normalize_address(record2.get('address', ''))
+        address_similarity = calculate_similarity(addr1, addr2) if addr1 and addr2 else 0.0
+        
+        # Subset check
+        is_subset = (name1 in name2 or name2 in name1) if name1 and name2 else False
+        
+        # Combined score
+        base_score = name_similarity * 0.5 + token_overlap * 0.3
+        
+        if phone_match:
+            base_score += THRESHOLDS['phone_match_boost']
+        
+        if address_similarity > 0.7:
+            base_score += THRESHOLDS['address_match_boost']
+        
+        if is_subset and len(name1) > 3 and len(name2) > 3:
+            base_score += 0.1
+        
+        return {
+            'fuzzy_score': min(base_score, 1.0),
+            'name_similarity': name_similarity,
+            'token_overlap': token_overlap,
+            'phone_match': phone_match,
+            'address_similarity': address_similarity,
+            'is_subset': is_subset
         }
+
+# ============================================
+# MAIN DEDUPLICATION FUNCTION
+# ============================================
+
+def run_deduplication(supabase):
+    """Main deduplication function - works with or without AI"""
+    logger.info("🚀 Starting deduplication pipeline...")
+    
+    try:
+        # Fetch records from Supabase
+        logger.info("📥 Fetching records from practice_records table...")
+        response = supabase.table('practice_records').select('*').execute()
+        records = response.data
         
-        return report
+        if not records:
+            logger.warning("⚠️ No records found in practice_records table")
+            return 0
+        
+        logger.info(f"📊 Processing {len(records)} records...")
+        
+        # Find duplicates using traditional fuzzy matching
+        duplicates = find_fuzzy_duplicates(records)
+        
+        # Create clusters from duplicate pairs
+        clusters = create_clusters(records, duplicates)
+        
+        # Merge records within each cluster
+        deduplicated_records = []
+        for cluster_id, cluster_indices in clusters.items():
+            cluster_records = [records[i] for i in cluster_indices]
+            merged_record = merge_cluster_records(cluster_records)
+            merged_record['cluster_id'] = cluster_id
+            merged_record['cluster_size'] = len(cluster_records)
+            deduplicated_records.append(merged_record)
+        
+        # Save results to dedupe_results table
+        if deduplicated_records:
+            logger.info(f"💾 Saving {len(deduplicated_records)} deduplicated records...")
+            
+            # Clear existing results
+            supabase.table('dedupe_results').delete().neq('id', -1).execute()
+            
+            # Insert new results in batches
+            batch_size = 50
+            for i in range(0, len(deduplicated_records), batch_size):
+                batch = deduplicated_records[i:i + batch_size]
+                supabase.table('dedupe_results').insert(batch).execute()
+            
+            logger.info(f"✅ Deduplication complete! Reduced from {len(records)} to {len(deduplicated_records)} records")
+        
+        return len(deduplicated_records)
+        
+    except Exception as e:
+        logger.error(f"❌ Deduplication failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+
+def find_fuzzy_duplicates(records: List[dict]) -> List[dict]:
+    """Find duplicate records using fuzzy matching"""
+    logger.info("🔍 Finding duplicates using fuzzy matching...")
+    
+    duplicates = []
+    fuzzy_matcher = TraditionalFuzzyMatcher()
+    
+    for i in range(len(records)):
+        for j in range(i + 1, len(records)):
+            scores = fuzzy_matcher.calculate_match_score(records[i], records[j])
+            
+            if scores['fuzzy_score'] >= THRESHOLDS['medium_confidence']:
+                duplicates.append({
+                    'idx1': i,
+                    'idx2': j,
+                    'score': scores['fuzzy_score'],
+                    'details': scores
+                })
+    
+    logger.info(f"✅ Found {len(duplicates)} potential duplicate pairs")
+    return duplicates
+
+def create_clusters(records: List[dict], duplicates: List[dict]) -> dict:
+    """Create clusters from duplicate pairs"""
+    clusters = {}
+    assigned = set()
+    cluster_count = 0
+    
+    # Process duplicate pairs
+    for dup in duplicates:
+        idx1, idx2 = dup['idx1'], dup['idx2']
+        
+        # Find existing cluster or create new one
+        cluster_id = None
+        
+        # Check if either record is already in a cluster
+        for cid, members in clusters.items():
+            if idx1 in members or idx2 in members:
+                cluster_id = cid
+                break
+        
+        if not cluster_id:
+            cluster_id = f"cluster_{cluster_count:04d}"
+            clusters[cluster_id] = set()
+            cluster_count += 1
+        
+        # Add both records to the cluster
+        clusters[cluster_id].add(idx1)
+        clusters[cluster_id].add(idx2)
+        assigned.add(idx1)
+        assigned.add(idx2)
+    
+    # Add singleton clusters for unmatched records
+    for i in range(len(records)):
+        if i not in assigned:
+            cluster_id = f"cluster_{cluster_count:04d}"
+            clusters[cluster_id] = {i}
+            cluster_count += 1
+    
+    # Convert sets to lists
+    return {k: list(v) for k, v in clusters.items()}
+
+def merge_cluster_records(cluster_records: List[dict]) -> dict:
+    """Merge multiple records into a single deduplicated record"""
+    if len(cluster_records) == 1:
+        return cluster_records[0].copy()
+    
+    # Start with the most complete record
+    def completeness_score(record):
+        return sum(1 for v in record.values() if v and str(v).strip())
+    
+    merged = max(cluster_records, key=completeness_score).copy()
+    
+    # Intelligently merge fields from all records
+    for field in merged.keys():
+        if field in ['id', 'created_at', 'updated_at']:
+            continue
+        
+        # Collect all non-empty values for this field
+        values = [r.get(field) for r in cluster_records if r.get(field)]
+        
+        if values:
+            if 'name' in field.lower():
+                # For names, prefer the longest (usually most complete)
+                merged[field] = max(values, key=lambda x: len(str(x)) if x else 0)
+            elif 'phone' in field.lower():
+                # For phones, use the most common or first valid one
+                merged[field] = Counter(values).most_common(1)[0][0]
+            else:
+                # For other fields, use the most common value
+                merged[field] = Counter(values).most_common(1)[0][0]
+    
+    # Add metadata about the merge
+    merged['merge_count'] = len(cluster_records)
+    merged['merge_confidence'] = 'high' if len(cluster_records) == 2 else 'medium'
+    merged['merge_method'] = 'fuzzy_matching'
+    
+    return merged
+
+# ============================================
+# OPTIONAL: AI ENHANCEMENT (if packages installed)
+# ============================================
+
+if AI_EMBEDDINGS_AVAILABLE or LLM_AVAILABLE:
+    logger.info("🎉 AI enhancements are available!")
+    # Add AI-enhanced deduplication here if needed
+else:
+    logger.info("ℹ️ Running with traditional fuzzy matching only")
