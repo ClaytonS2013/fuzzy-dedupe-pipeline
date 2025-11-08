@@ -1,4 +1,3 @@
-# Replace your current Dockerfile with this fixed version
 ARG PYTHON_VERSION=3.10
 
 FROM python:${PYTHON_VERSION}-slim as builder
@@ -14,13 +13,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade pip setuptools wheel
 
 COPY requirements.txt /tmp/
-
-# FIX: Explicitly install AI packages
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
     pip install --no-cache-dir --upgrade sentence-transformers==2.2.2 faiss-cpu==1.7.4
 
-# Verify AI packages installed
-RUN python -c "import sentence_transformers; import faiss; print('✅ AI packages verified')"
+# Verify AI packages
+RUN python -c "import sentence_transformers; import faiss; print('✅ AI packages installed')"
 
 FROM python:${PYTHON_VERSION}-slim
 
@@ -38,13 +35,15 @@ WORKDIR /app
 
 COPY --chown=appuser:appuser . .
 
-RUN mkdir -p /app/models /app/logs /app/data && \
+RUN mkdir -p /app/models /app/logs /app/data /app/config /app/database && \
     chown -R appuser:appuser /app && \
-    if [ -f startup.sh ]; then chmod +x startup.sh; fi
+    if [ -f startup.sh ]; then chmod +x startup.sh; fi && \
+    if [ -f fix_ai.sh ]; then chmod +x fix_ai.sh; fi
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    TRANSFORMERS_CACHE=/app/models
 
 USER appuser
 
