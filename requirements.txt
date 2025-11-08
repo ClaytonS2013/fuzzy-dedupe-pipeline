@@ -19,10 +19,6 @@ APScheduler==3.10.4
 # Logging
 python-json-logger==2.0.7
 
-# ============================================
-# AI Enhancement packages (Optional but recommended)
-# ============================================
-
 # Claude AI for intelligent validation
 anthropic==0.18.1
 
