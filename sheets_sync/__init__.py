@@ -1,9 +1,20 @@
 """
-sheets_sync package
-
-Bidirectional sync between Google Sheets and Supabase
+Sheets Sync Module - Package Initialization
+This makes sheets_sync a proper Python package
 """
 
-from .main import sync_sheets_to_supabase, write_clean_data_to_sheet
+from .sync import (
+    init_google_sheets_client,
+    init_supabase_client,
+    sync_sheets_to_supabase,
+    sync_supabase_to_sheets
+)
 
-__all__ = ['sync_sheets_to_supabase', 'write_clean_data_to_sheet']
+__all__ = [
+    'init_google_sheets_client',
+    'init_supabase_client',
+    'sync_sheets_to_supabase',
+    'sync_supabase_to_sheets'
+]
+
+__version__ = '1.0.0'
