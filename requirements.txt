@@ -1,13 +1,26 @@
+# Core dependencies for Google Sheets and Supabase
 gspread==5.12.0
 google-auth==2.23.4
 google-auth-oauthlib==1.1.0
 supabase==2.0.0
 pandas==2.1.3
-numpy==1.24.3
 python-dotenv==1.0.0
+
+# AI/ML Dependencies for advanced deduplication
 sentence-transformers==3.0.1
+torch>=2.0.0
 faiss-cpu==1.7.4
-anthropic==0.31.0
-scipy==1.11.4
+transformers>=4.30.0
+
+# Fuzzy matching and text processing
+rapidfuzz==3.5.2
+python-Levenshtein==0.23.0
+phonenumbers==8.13.25
+
+# Data processing and utilities
+numpy==1.24.3
 scikit-learn==1.3.2
-python-dateutil==2.8.2
+tqdm==4.66.1
+
+# Optional: For better performance monitoring
+psutil==5.9.6
