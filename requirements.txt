@@ -23,7 +23,7 @@ python-json-logger==2.0.7
 anthropic==0.18.1
 
 # Semantic similarity with embeddings
-sentence-transformers==2.2.2
+sentence-transformers==3.0.1
 faiss-cpu==1.7.4
 
 # Machine learning
