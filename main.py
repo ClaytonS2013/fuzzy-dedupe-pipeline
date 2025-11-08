@@ -58,6 +58,7 @@ def _log_pipeline_stage(
         "apikey": supabase_key,
         "Authorization": f"Bearer {supabase_key}",
         "Content-Type": "application/json",
+        # Request returning inserted record; adjust as needed
         "Prefer": "return=minimal",
     }
     try:
@@ -188,7 +189,7 @@ def main():
             start_time = time.perf_counter()
             logger.info("")
             logger.info("=" * 60)
-            logger.info("🧐 STAGE 2: Running Deduplication")
+            logger.info("🧠 STAGE 2: Running Deduplication")
             logger.info("=" * 60)
             
             run_dedupe()
