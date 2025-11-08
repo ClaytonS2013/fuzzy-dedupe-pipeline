@@ -1,24 +1,42 @@
-# Build stage
-FROM python:3.10-slim as builder
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ python3-dev
-
-COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
-
-# Runtime stage
+# Dockerfile for AI-Enhanced Deduplication Pipeline
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copy only the installed packages from builder
-COPY --from=builder /root/.local /root/.local
-COPY . .
+# Install system dependencies for ML libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    python3-dev \
+    build-essential \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Make sure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
+# Copy requirements first for better caching
+COPY requirements.txt .
 
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Pre-download the sentence transformer models to include in image
+# This avoids downloading them at runtime
+RUN python -c "from sentence_transformers import SentenceTransformer; \
+    SentenceTransformer('all-mpnet-base-v2'); \
+    SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Copy application code
+COPY main.py .
+COPY sheets_sync/ ./sheets_sync/
+COPY dedupe_logic/ ./dedupe_logic/
+COPY database/ ./database/
+
+# Set Python to run in unbuffered mode for better logging
+ENV PYTHONUNBUFFERED=1
+
+# Optimize torch for CPU
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+
+# Run the application
 CMD ["python", "main.py"]
