@@ -13,15 +13,29 @@ numpy==1.26.2
 python-dotenv==1.0.0
 requests==2.31.0
 
-# Scheduling (if using APScheduler)
+# Scheduling (optional)
 APScheduler==3.10.4
 
 # Logging
 python-json-logger==2.0.7
 
-# AI Enhancement packages
+# ============================================
+# AI Enhancement packages (Optional but recommended)
+# Comment out any you don't want to use
+# ============================================
+
+# Claude AI for intelligent validation
 anthropic==0.18.1
+
+# Semantic similarity with embeddings
 sentence-transformers==2.2.2
 faiss-cpu==1.7.4
+
+# PyTorch for transformers (CPU version)
 torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+--index-url https://download.pytorch.org/whl/cpu
+
+# Machine learning
 scikit-learn==1.3.0
