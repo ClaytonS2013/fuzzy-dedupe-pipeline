@@ -344,7 +344,7 @@ class AdvancedAIDeduplicator:
         
         return semantic_embeddings, address_embeddings
     
-    def build_faiss_index(self, embeddings: np.ndarray) -> faiss.IndexFlatIP:
+    def build_faiss_index(self, embeddings: np.ndarray):
         """Build FAISS index for efficient similarity search"""
         dimension = embeddings.shape[1]
         
@@ -647,9 +647,9 @@ def simple_deduplication(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def run_deduplication(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
+def run_deduplication_with_ai(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
     """
-    Main entry point for deduplication process.
+    Main entry point for deduplication process with AI.
     
     Args:
         df: Input DataFrame with practice data
@@ -718,7 +718,7 @@ def run_deduplication(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
 
 # For backward compatibility with the main.py import
 def run_deduplication(supabase_client) -> int:
-    """Legacy function signature for compatibility"""
+    """Legacy function signature for compatibility with main.py"""
     from supabase import Client
     
     logger.info("🔄 Running deduplication with Supabase client")
@@ -734,8 +734,8 @@ def run_deduplication(supabase_client) -> int:
     # Convert to DataFrame
     df = pd.DataFrame(records)
     
-    # Run deduplication
-    clean_df = run_deduplication(df, use_ai=True)
+    # Run AI deduplication - CALL THE RENAMED FUNCTION
+    clean_df = run_deduplication_with_ai(df, use_ai=True)
     
     # Clear existing dedupe_results
     supabase_client.table('dedupe_results').delete().neq('id', 0).execute()
