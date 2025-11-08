@@ -1,823 +1,404 @@
 """
-Advanced AI-Enhanced Deduplication Processor with Full Sentence Transformers
-Utilizes state-of-the-art models for maximum accuracy in duplicate detection
+Advanced AI-powered deduplication processor with FIXED field mapping
 """
-
-import pandas as pd
-import numpy as np
-from typing import List, Dict, Set, Tuple, Optional
 import logging
-import re
-from dataclasses import dataclass, asdict
-import json
-from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
 import time
-from functools import wraps
+import re
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-# Try importing AI/ML libraries with error handling
+# Try to import AI libraries
+AI_AVAILABLE = False
 try:
-    from sentence_transformers import SentenceTransformer, util
     import torch
+    from sentence_transformers import SentenceTransformer
     import faiss
+    import numpy as np
     AI_AVAILABLE = True
     logger.info("✅ AI libraries imported successfully")
 except ImportError as e:
-    AI_AVAILABLE = False
-    logger.warning(f"⚠️ AI libraries not available: {e}")
-    SentenceTransformer = None
-    torch = None
-    faiss = None
+    logger.warning(f"AI libraries not available: {e}")
+    logger.warning("Falling back to rule-based deduplication")
 
-# Always import fuzzy matching as fallback
-from rapidfuzz import fuzz, process
-
-try:
-    import phonenumbers
-    from phonenumbers import NumberParseException
-    PHONE_LIB_AVAILABLE = True
-except ImportError:
-    PHONE_LIB_AVAILABLE = False
-    logger.warning("⚠️ phonenumbers library not available")
-
-def timer(func):
-    """Decorator to time function execution"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.time()
-        result = func(*args, **kwargs)
-        end = time.time()
-        logger.info(f"⏱️ {func.__name__} took {end - start:.2f} seconds")
-        return result
-    return wrapper
-
-@dataclass
-class MatchResult:
-    """Store detailed matching results with confidence scores"""
-    index1: int
-    index2: int
-    match_type: str  # 'semantic', 'phone', 'name', 'address', 'epd', 'hybrid'
-    confidence: float
-    details: dict
-    business1_name: str = ""
-    business2_name: str = ""
-
-    def to_dict(self):
-        return asdict(self)
 
 class AdvancedAIDeduplicator:
-    """
-    Advanced deduplicator using multiple AI models and matching strategies.
-    Optimized for accuracy over speed since we have no size constraints.
-    """
+    """Advanced deduplicator using AI semantic matching."""
     
-    def __init__(self, 
-                 # Model selection - using larger, more accurate models
-                 semantic_model: str = 'all-mpnet-base-v2',  # Better than MiniLM
-                 address_model: str = 'all-MiniLM-L6-v2',    # Specialized for addresses
-                 # Thresholds
-                 semantic_threshold: float = 0.8,
-                 address_threshold: float = 0.85,
-                 name_threshold: float = 0.75,
-                 fuzzy_threshold: float = 80.0,
-                 # Feature flags
-                 use_gpu: bool = False,
-                 batch_size: int = 32,
-                 cache_embeddings: bool = True):
-        """
-        Initialize advanced deduplicator with multiple models.
-        """
+    def __init__(self, semantic_threshold=0.8, address_threshold=0.85):
+        """Initialize AI deduplicator with models."""
         self.semantic_threshold = semantic_threshold
         self.address_threshold = address_threshold
-        self.name_threshold = name_threshold
-        self.fuzzy_threshold = fuzzy_threshold
-        self.batch_size = batch_size
-        self.cache_embeddings = cache_embeddings
         
-        # Check if AI is available
-        if not AI_AVAILABLE:
-            raise ImportError("AI libraries not available. Please install sentence-transformers, torch, and faiss-cpu")
-        
-        # Set device
-        self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+        # Check for GPU
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"🖥️ Using device: {self.device}")
         
-        # Initialize models
-        logger.info(f"📦 Loading semantic model: {semantic_model}")
-        self.semantic_model = SentenceTransformer(semantic_model, device=self.device)
+        # Load models
+        logger.info("📦 Loading semantic model: all-mpnet-base-v2")
+        self.semantic_model = SentenceTransformer('all-mpnet-base-v2', device=self.device)
         
-        logger.info(f"📦 Loading address model: {address_model}")
-        self.address_model = SentenceTransformer(address_model, device=self.device)
-        
-        # Put models in eval mode for efficiency
-        self.semantic_model.eval()
-        self.address_model.eval()
-        
-        # Embedding caches
-        self.embedding_cache = {} if cache_embeddings else None
-        
-        # Statistics tracking
-        self.stats = {
-            'total_comparisons': 0,
-            'semantic_matches': 0,
-            'phone_matches': 0,
-            'address_matches': 0,
-            'name_matches': 0,
-            'hybrid_matches': 0,
-            'processing_time': 0
-        }
+        logger.info("📦 Loading address model: all-MiniLM-L6-v2")
+        self.address_model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
         
         logger.info("✅ Advanced AI Deduplicator initialized successfully")
     
     def normalize_phone(self, phone: str) -> str:
-        """Advanced phone normalization with international support"""
-        if pd.isna(phone) or not phone:
-            return ""
-        
-        phone_str = str(phone).strip()
-        
-        if PHONE_LIB_AVAILABLE:
-            try:
-                # Try parsing as US number first
-                parsed = phonenumbers.parse(phone_str, "US")
-                if phonenumbers.is_valid_number(parsed):
-                    # Return in E164 format for consistent comparison
-                    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-            except:
-                pass
-        
-        # Fallback to simple normalization
-        digits = re.sub(r'\D', '', phone_str)
-        if len(digits) == 11 and digits[0] == '1':
-            digits = digits[1:]
-        
-        return digits
+        """Normalize phone numbers to digits only."""
+        if not phone or phone == '#ERROR!':
+            return ''
+        return re.sub(r'\D', '', str(phone))
     
     def normalize_text(self, text: str) -> str:
-        """Enhanced text normalization"""
-        if pd.isna(text) or not text:
-            return ""
-        
+        """Normalize text for comparison."""
+        if not text:
+            return ''
         text = str(text).lower().strip()
-        
-        # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
-        
-        # Remove punctuation but keep important separators
-        text = re.sub(r'[^\w\s\-&]', '', text)
-        
-        # Expand common abbreviations
-        abbreviations = {
-            r'\bdba\b': 'doing business as',
-            r'\bllc\b': '',
-            r'\binc\b': '',
-            r'\bcorp\b': '',
-            r'\bco\b': '',
-            r'\bltd\b': '',
-            r'\bpllc\b': '',
-            r'\bpa\b': '',
-            r'\bpc\b': '',
-        }
-        
-        for abbr, expansion in abbreviations.items():
-            text = re.sub(abbr, expansion, text, flags=re.IGNORECASE)
-        
-        # Remove extra whitespace again
-        text = re.sub(r'\s+', ' ', text).strip()
-        
+        text = re.sub(r'[^\w\s]', '', text)
         return text
     
-    def normalize_address(self, address: str) -> str:
-        """Advanced address normalization"""
-        if pd.isna(address) or not address:
-            return ""
+    def generate_embeddings(self, records: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate embeddings for semantic and address matching."""
+        start_time = time.time()
         
-        address = str(address).lower().strip()
-        
-        # Standardize directionals
-        directionals = {
-            r'\bnorth\b': 'n',
-            r'\bsouth\b': 's',
-            r'\beast\b': 'e',
-            r'\bwest\b': 'w',
-            r'\bnortheast\b': 'ne',
-            r'\bnorthwest\b': 'nw',
-            r'\bsoutheast\b': 'se',
-            r'\bsouthwest\b': 'sw',
-        }
-        
-        for full, abbr in directionals.items():
-            address = re.sub(full, abbr, address)
-        
-        # Standardize street types
-        street_types = {
-            r'\bstreet\b': 'st',
-            r'\bavenue\b': 'ave',
-            r'\broad\b': 'rd',
-            r'\bdrive\b': 'dr',
-            r'\blane\b': 'ln',
-            r'\bboulevard\b': 'blvd',
-            r'\bparkway\b': 'pkwy',
-            r'\bhighway\b': 'hwy',
-            r'\bfreeway\b': 'fwy',
-            r'\bexpressway\b': 'expy',
-            r'\bplace\b': 'pl',
-            r'\bcourt\b': 'ct',
-            r'\bsquare\b': 'sq',
-            r'\bcircle\b': 'cir',
-        }
-        
-        for full, abbr in street_types.items():
-            address = re.sub(full, abbr, address)
-        
-        # Standardize units
-        units = {
-            r'\bapartment\b': 'apt',
-            r'\bsuite\b': 'ste',
-            r'\bunit\b': 'unit',
-            r'\bfloor\b': 'fl',
-            r'\bbuilding\b': 'bldg',
-        }
-        
-        for full, abbr in units.items():
-            address = re.sub(full, abbr, address)
-        
-        # Remove extra whitespace
-        address = re.sub(r'\s+', ' ', address)
-        
-        return address.strip()
-    
-    def create_semantic_text(self, row: pd.Series) -> str:
-        """Create comprehensive text for semantic embedding"""
-        parts = []
-        
-        # Handle both possible column names for name
-        name_col = None
-        if 'Practice Name' in row.index:
-            name_col = 'Practice Name'
-        elif 'name' in row.index:
-            name_col = 'name'
-        
-        if name_col and not pd.isna(row.get(name_col)):
-            name = self.normalize_text(str(row[name_col]))
-            parts.append(f"business name: {name}")
-        
-        # Handle both possible column names for address
-        addr_col = None
-        if 'Practice Address' in row.index:
-            addr_col = 'Practice Address'
-        elif 'address' in row.index:
-            addr_col = 'address'
-        
-        if addr_col and not pd.isna(row.get(addr_col)):
-            addr = self.normalize_address(str(row[addr_col]))
-            parts.append(f"address: {addr}")
-        
-        # Handle other location fields
-        if not pd.isna(row.get('City')):
-            parts.append(f"city: {str(row['City']).lower()}")
-        
-        if not pd.isna(row.get('State')):
-            parts.append(f"state: {str(row['State']).upper()}")
-        
-        if not pd.isna(row.get('Zip')):
-            parts.append(f"zip: {str(row['Zip'])[:5]}")
-        
-        # Contact information
-        if not pd.isna(row.get('phone_number')):
-            phone = self.normalize_phone(row['phone_number'])
-            if phone:
-                parts.append(f"phone: {phone}")
-        
-        # Business type/category
-        type_col = None
-        if 'Practice Type' in row.index:
-            type_col = 'Practice Type'
-        elif 'category' in row.index:
-            type_col = 'category'
-        
-        if type_col and not pd.isna(row.get(type_col)):
-            parts.append(f"type: {str(row[type_col]).lower()}")
-        
-        # Website
-        if not pd.isna(row.get('open_website')):
-            website = str(row['open_website']).lower()
-            # Extract domain name
-            website = re.sub(r'https?://', '', website)
-            website = re.sub(r'www\.', '', website)
-            website = website.split('/')[0]
-            parts.append(f"website: {website}")
-        
-        return " | ".join(parts)
-    
-    def create_address_text(self, row: pd.Series) -> str:
-        """Create specialized text for address embedding"""
-        parts = []
-        
-        # Handle both possible column names for address
-        addr_col = None
-        if 'Practice Address' in row.index:
-            addr_col = 'Practice Address'
-        elif 'address' in row.index:
-            addr_col = 'address'
-        
-        if addr_col and not pd.isna(row.get(addr_col)):
-            parts.append(self.normalize_address(str(row[addr_col])))
-        
-        if not pd.isna(row.get('City')):
-            parts.append(str(row['City']).lower())
-        
-        if not pd.isna(row.get('State')):
-            parts.append(str(row['State']).upper())
-        
-        if not pd.isna(row.get('Zip')):
-            parts.append(str(row['Zip'])[:5])
-        
-        return ", ".join(parts)
-    
-    @timer
-    def generate_embeddings(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate both semantic and address embeddings for all records"""
-        logger.info(f"🧮 Generating embeddings for {len(df)} records...")
-        
-        # Create text representations
+        # Prepare texts for embedding
         semantic_texts = []
         address_texts = []
         
-        for idx, row in df.iterrows():
-            semantic_texts.append(self.create_semantic_text(row))
-            address_texts.append(self.create_address_text(row))
+        for record in records:
+            # Semantic text (name + category)
+            name = record.get('name', '')
+            category = record.get('category', '')
+            semantic_text = f"{name} {category}".strip()
+            semantic_texts.append(semantic_text if semantic_text else "unknown")
+            
+            # Address text
+            address_parts = [
+                str(record.get('address', '')),
+                str(record.get('Street Address', '')),
+                str(record.get('City', '')),
+                str(record.get('State', '')),
+                str(record.get('Zip', ''))
+            ]
+            address_text = ' '.join(filter(None, address_parts))
+            address_texts.append(address_text if address_text else "unknown")
         
-        # Generate embeddings in batches
+        # Generate embeddings
         logger.info("📊 Generating semantic embeddings...")
         semantic_embeddings = self.semantic_model.encode(
             semantic_texts,
-            batch_size=self.batch_size,
-            show_progress_bar=True,
             convert_to_numpy=True,
-            normalize_embeddings=True  # L2 normalization for cosine similarity
+            show_progress_bar=True,
+            batch_size=32
         )
         
         logger.info("📍 Generating address embeddings...")
         address_embeddings = self.address_model.encode(
             address_texts,
-            batch_size=self.batch_size,
-            show_progress_bar=True,
             convert_to_numpy=True,
-            normalize_embeddings=True
+            show_progress_bar=True,
+            batch_size=32
         )
+        
+        elapsed = time.time() - start_time
+        logger.info(f"⏱️ generate_embeddings took {elapsed:.2f} seconds")
         
         return semantic_embeddings, address_embeddings
     
-    def build_faiss_index(self, embeddings: np.ndarray):
-        """Build FAISS index for efficient similarity search"""
-        dimension = embeddings.shape[1]
+    def find_duplicates_ai(self, records: List[Dict]) -> List[Dict]:
+        """Find duplicates using AI-powered matching."""
+        start_time = time.time()
         
-        # Use Inner Product (cosine similarity) since embeddings are normalized
-        index = faiss.IndexFlatIP(dimension)
-        index.add(embeddings.astype('float32'))
+        if len(records) <= 1:
+            return []
         
-        return index
-    
-    @timer
-    def find_duplicates_ai(self, df: pd.DataFrame) -> List[MatchResult]:
-        """Find duplicates using AI-powered semantic matching"""
-        matches = []
+        logger.info(f"🧮 Generating embeddings for {len(records)} records...")
+        semantic_embeddings, address_embeddings = self.generate_embeddings(records)
         
-        # Generate embeddings
-        semantic_emb, address_emb = self.generate_embeddings(df)
-        
-        # Build FAISS indices for fast search
+        # Build FAISS indices for fast similarity search
         logger.info("🔍 Building FAISS indices...")
-        semantic_index = self.build_faiss_index(semantic_emb)
-        address_index = self.build_faiss_index(address_emb)
+        semantic_index = faiss.IndexFlatIP(semantic_embeddings.shape[1])
+        address_index = faiss.IndexFlatIP(address_embeddings.shape[1])
         
-        # Prepare normalized data for additional checks
-        # Handle both possible column names
-        name_col = 'Practice Name' if 'Practice Name' in df.columns else 'name' if 'name' in df.columns else None
+        # Normalize embeddings for cosine similarity
+        faiss.normalize_L2(semantic_embeddings)
+        faiss.normalize_L2(address_embeddings)
         
-        if name_col:
-            df['norm_name'] = df[name_col].apply(self.normalize_text)
-        else:
-            df['norm_name'] = ''
+        semantic_index.add(semantic_embeddings)
+        address_index.add(address_embeddings)
         
-        if 'phone_number' in df.columns:
-            df['norm_phone'] = df['phone_number'].apply(self.normalize_phone)
-        else:
-            df['norm_phone'] = ''
-        
-        # Track processed pairs to avoid duplicates
+        # Find duplicates
+        duplicates = []
         processed_pairs = set()
         
         logger.info("🔄 Finding semantic duplicates...")
+        k = min(10, len(records))
+        semantic_distances, semantic_indices = semantic_index.search(semantic_embeddings, k)
         
-        # For each record, find potential duplicates
-        for i in range(len(df)):
-            # Skip if this is part of an already processed pair
-            if any(i in pair for pair in processed_pairs):
-                continue
-            
-            # Search for similar records using semantic embeddings
-            k = min(10, len(df))  # Look at top 10 most similar
-            semantic_scores, semantic_indices = semantic_index.search(
-                semantic_emb[i:i+1].astype('float32'), k
-            )
-            
-            # Search using address embeddings
-            address_scores, address_indices = address_index.search(
-                address_emb[i:i+1].astype('float32'), k
-            )
-            
-            # Process potential matches
-            for j, sem_score in zip(semantic_indices[0], semantic_scores[0]):
-                if i >= j:  # Skip self and already processed pairs
+        for i in range(len(records)):
+            for j_idx, score in zip(semantic_indices[i], semantic_distances[i]):
+                if i >= j_idx:
                     continue
-                
-                if (i, j) in processed_pairs or (j, i) in processed_pairs:
+                    
+                pair = (i, j_idx)
+                if pair in processed_pairs:
                     continue
-                
-                # Get address similarity score
-                addr_score = address_emb[i] @ address_emb[j]
-                
-                # Calculate combined confidence
-                row_i = df.iloc[i]
-                row_j = df.iloc[j]
-                
-                # Check various matching criteria
-                is_match = False
-                match_type = None
-                confidence = 0.0
-                details = {
-                    'semantic_score': float(sem_score),
-                    'address_score': float(addr_score)
-                }
-                
-                # 1. Strong semantic similarity
-                if sem_score >= self.semantic_threshold:
-                    is_match = True
-                    match_type = 'semantic'
-                    confidence = float(sem_score)
-                    details['reason'] = f'High semantic similarity: {sem_score:.3f}'
-                
-                # 2. Strong address match with decent name match
-                elif addr_score >= self.address_threshold and df['norm_name'].iloc[i] and df['norm_name'].iloc[j]:
-                    name_similarity = fuzz.ratio(df['norm_name'].iloc[i], df['norm_name'].iloc[j]) / 100
-                    if name_similarity >= 0.6:  # Lower threshold when combined with address
-                        is_match = True
+                    
+                if score >= self.semantic_threshold:
+                    processed_pairs.add(pair)
+                    
+                    # Check address similarity
+                    address_score = np.dot(address_embeddings[i], address_embeddings[j_idx])
+                    
+                    # Check phone similarity
+                    phone1 = self.normalize_phone(records[i].get('phone_number', ''))
+                    phone2 = self.normalize_phone(records[j_idx].get('phone_number', ''))
+                    phone_match = phone1 and phone2 and phone1 == phone2
+                    
+                    # Determine match type
+                    if phone_match and address_score >= 0.7:
                         match_type = 'hybrid'
-                        confidence = (addr_score * 0.6 + name_similarity * 0.4)
-                        details['name_similarity'] = name_similarity
-                        details['reason'] = f'Address + name match: {addr_score:.3f} + {name_similarity:.3f}'
-                
-                # 3. Exact phone match
-                if not is_match and df['norm_phone'].iloc[i] and df['norm_phone'].iloc[j]:
-                    if df['norm_phone'].iloc[i] == df['norm_phone'].iloc[j]:
-                        is_match = True
-                        match_type = 'phone'
-                        confidence = 0.95
-                        details['reason'] = f'Exact phone match: {df["norm_phone"].iloc[i]}'
-                
-                # 4. EPD# exact match
-                epd_col = 'epd#' if 'epd#' in row_i.index else 'place_id' if 'place_id' in row_i.index else None
-                if not is_match and epd_col and not pd.isna(row_i.get(epd_col)) and not pd.isna(row_j.get(epd_col)):
-                    if str(row_i[epd_col]).strip() == str(row_j[epd_col]).strip():
-                        is_match = True
-                        match_type = 'epd'
-                        confidence = 0.98
-                        details['reason'] = f'EPD/Place ID match: {row_i[epd_col]}'
-                
-                if is_match:
-                    # Get the name for logging
-                    if name_col:
-                        name1 = str(row_i.get(name_col, ''))
-                        name2 = str(row_j.get(name_col, ''))
+                        confidence = min(0.95, (score + address_score) / 2)
+                    elif address_score >= self.address_threshold:
+                        match_type = 'semantic+address'
+                        confidence = min(0.95, (score + address_score) / 2)
                     else:
-                        name1 = f"Record {i}"
-                        name2 = f"Record {j}"
+                        match_type = 'semantic'
+                        confidence = score
                     
-                    match_result = MatchResult(
-                        index1=i,
-                        index2=j,
-                        match_type=match_type,
-                        confidence=confidence,
-                        details=details,
-                        business1_name=name1,
-                        business2_name=name2
-                    )
-                    matches.append(match_result)
-                    processed_pairs.add((i, j))
+                    duplicate = {
+                        'record1_id': records[i].get('id'),
+                        'record2_id': records[j_idx].get('id'),
+                        'record1_name': records[i].get('name'),
+                        'record2_name': records[j_idx].get('name'),
+                        'match_type': match_type,
+                        'confidence': float(confidence),
+                        'semantic_score': float(score),
+                        'address_score': float(address_score),
+                        'phone_match': phone_match
+                    }
                     
-                    # Log the match
-                    logger.info(f"🔗 Match found: {match_result.business1_name} ↔ {match_result.business2_name}")
+                    duplicates.append(duplicate)
+                    
+                    logger.info(f"🔗 Match found: {duplicate['record1_name']} ↔ {duplicate['record2_name']}")
                     logger.info(f"   Type: {match_type}, Confidence: {confidence:.3f}")
-                    
-                    # Update statistics
-                    self.stats[f'{match_type}_matches'] = self.stats.get(f'{match_type}_matches', 0) + 1
         
-        # Clean up temporary columns
-        df.drop(['norm_phone', 'norm_name'], axis=1, inplace=True, errors='ignore')
+        elapsed = time.time() - start_time
+        logger.info(f"⏱️ find_duplicates_ai took {elapsed:.2f} seconds")
         
-        return matches
+        return duplicates
     
-    def merge_duplicate_records(self, df: pd.DataFrame, indices: List[int]) -> pd.Series:
-        """
-        Intelligently merge duplicate records, keeping the most complete information.
-        """
-        if not indices:
-            return pd.Series()
+    def cluster_duplicates(self, records: List[Dict], duplicates: List[Dict]) -> Tuple[List[Dict], Dict]:
+        """Cluster duplicates and return unique records with cluster information."""
+        # Build adjacency list
+        adjacency = defaultdict(set)
+        confidence_map = {}
         
-        # Get all duplicate rows
-        dup_rows = df.loc[indices]
+        for dup in duplicates:
+            id1, id2 = dup['record1_id'], dup['record2_id']
+            adjacency[id1].add(id2)
+            adjacency[id2].add(id1)
+            confidence_map[(id1, id2)] = dup['confidence']
+            confidence_map[(id2, id1)] = dup['confidence']
         
-        # Start with the first row as base
-        merged = dup_rows.iloc[0].copy()
+        # Find connected components (clusters)
+        visited = set()
+        clusters = []
         
-        # Determine which column names we're using
-        name_col = 'Practice Name' if 'Practice Name' in dup_rows.columns else 'name' if 'name' in dup_rows.columns else None
-        addr_col = 'Practice Address' if 'Practice Address' in dup_rows.columns else 'address' if 'address' in dup_rows.columns else None
-        
-        # For each field, intelligently select the best value
-        for col in dup_rows.columns:
-            values = dup_rows[col].dropna()
-            
-            if len(values) == 0:
-                continue
-            
-            # Important fields: take the longest (most complete) value
-            if col == name_col or col == addr_col:
-                unique_normalized = set(self.normalize_text(str(v)) for v in values)
-                if len(unique_normalized) == 1:
-                    # All values are essentially the same, take the longest
-                    merged[col] = max(values, key=lambda x: len(str(x)))
-                else:
-                    # Values differ, take the most common or longest
-                    value_counts = values.value_counts()
-                    if value_counts.iloc[0] > 1:
-                        merged[col] = value_counts.index[0]
-                    else:
-                        merged[col] = max(values, key=lambda x: len(str(x)))
-            
-            elif col in ['phone_number', 'epd#', 'place_id']:
-                # For identifiers, check consistency
-                unique_values = set(str(v).strip() for v in values)
-                if len(unique_values) == 1:
-                    merged[col] = values.iloc[0]
-                else:
-                    # Multiple values, log warning and take first non-empty
-                    logger.warning(f"Multiple {col} values found: {unique_values}")
-                    merged[col] = values.iloc[0]
-            
-            else:
-                # For other fields, take the longest non-empty value
-                merged[col] = max(values, key=lambda x: len(str(x)))
-        
-        # Add metadata about the merge
-        merged['merge_count'] = len(indices)
-        merged['merge_confidence'] = 0.95  # High confidence since AI-verified
-        merged['merge_date'] = datetime.now().isoformat()
-        
-        return merged
-    
-    def deduplicate(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
-        """
-        Main deduplication function using AI-powered matching.
-        
-        Returns:
-            Tuple of (deduplicated_dataframe, statistics_dict)
-        """
-        start_time = time.time()
-        logger.info(f"🚀 Starting AI-powered deduplication for {len(df)} records")
-        
-        # Find all duplicate matches using AI
-        matches = self.find_duplicates_ai(df)
-        
-        # Group matches into clusters
-        duplicate_clusters = {}
-        for match in matches:
-            # Find or create cluster for index1
-            cluster_id = None
-            for cid, indices in duplicate_clusters.items():
-                if match.index1 in indices or match.index2 in indices:
-                    cluster_id = cid
-                    break
-            
-            if cluster_id is None:
-                cluster_id = match.index1
-                duplicate_clusters[cluster_id] = set([match.index1])
-            
-            # Add both indices to cluster
-            duplicate_clusters[cluster_id].add(match.index1)
-            duplicate_clusters[cluster_id].add(match.index2)
-        
-        # Convert clusters to lists for processing
-        duplicate_clusters = {k: list(v) for k, v in duplicate_clusters.items()}
-        
-        # Create deduplicated dataset
-        clean_records = []
-        processed_indices = set()
-        
-        for idx, row in df.iterrows():
-            if idx in processed_indices:
-                continue
-            
-            # Check if this index is part of a duplicate cluster
-            cluster_indices = None
-            for cluster in duplicate_clusters.values():
-                if idx in cluster:
-                    cluster_indices = cluster
-                    break
-            
-            if cluster_indices:
-                # Merge the duplicate cluster
-                merged_record = self.merge_duplicate_records(df, cluster_indices)
-                clean_records.append(merged_record)
-                processed_indices.update(cluster_indices)
+        for record in records:
+            record_id = record['id']
+            if record_id not in visited:
+                # BFS to find cluster
+                cluster = set()
+                queue = [record_id]
                 
-                # Get name for logging
-                name_col = 'Practice Name' if 'Practice Name' in merged_record.index else 'name' if 'name' in merged_record.index else None
-                if name_col:
-                    name = merged_record[name_col]
-                else:
-                    name = f"Record {cluster_indices[0]}"
-                logger.info(f"✅ Merged {len(cluster_indices)} duplicates: {name}")
-            else:
-                # Unique record
-                row_copy = row.copy()
-                row_copy['merge_count'] = 1
-                row_copy['merge_confidence'] = 1.0
-                row_copy['merge_date'] = datetime.now().isoformat()
-                clean_records.append(row_copy)
-                processed_indices.add(idx)
+                while queue:
+                    current = queue.pop(0)
+                    if current in visited:
+                        continue
+                    visited.add(current)
+                    cluster.add(current)
+                    
+                    for neighbor in adjacency.get(current, []):
+                        if neighbor not in visited:
+                            queue.append(neighbor)
+                
+                clusters.append(cluster)
         
-        # Create clean DataFrame
-        clean_df = pd.DataFrame(clean_records)
-        clean_df.reset_index(drop=True, inplace=True)
+        # Select representative from each cluster
+        unique_records = []
+        cluster_info = {}
         
-        # Calculate statistics
-        end_time = time.time()
-        self.stats['processing_time'] = end_time - start_time
-        self.stats['total_records'] = len(df)
-        self.stats['unique_records'] = len(clean_df)
-        self.stats['duplicates_removed'] = len(df) - len(clean_df)
-        self.stats['duplicate_clusters'] = len(duplicate_clusters)
-        self.stats['total_matches'] = len(matches)
+        for cluster_idx, cluster in enumerate(clusters):
+            # Get all records in cluster
+            cluster_records = [r for r in records if r['id'] in cluster]
+            
+            # Select representative (prefer most complete record)
+            representative = max(cluster_records, key=lambda r: (
+                len(str(r.get('name', ''))),
+                len(str(r.get('address', ''))),
+                len(str(r.get('phone_number', ''))),
+                r.get('reviews_count', 0)
+            ))
+            
+            # Track cluster information
+            for record_id in cluster:
+                cluster_info[record_id] = {
+                    'cluster_id': representative['id'],
+                    'duplicate_count': len(cluster),
+                    'confidence': max([confidence_map.get((record_id, other), 0) 
+                                     for other in cluster if other != record_id] or [1.0])
+                }
+            
+            unique_records.append(representative)
+            
+            if len(cluster) > 1:
+                logger.info(f"✅ Merged {len(cluster)-1} duplicates: {representative.get('name')}")
         
-        # Log summary
+        return unique_records, cluster_info
+
+
+def run_deduplication(supabase_client):
+    """Run deduplication process with FIXED field mapping."""
+    try:
+        # Fetch all practice records
+        response = supabase_client.table('practice_records').select("*").execute()
+        all_records = response.data
+        
+        if not all_records:
+            logger.warning("No records found in practice_records")
+            return 0
+        
+        logger.info(f"🚀 Starting deduplication with {len(all_records)} records")
+        
+        # Initialize deduplicator
+        use_ai = True
+        if use_ai and AI_AVAILABLE:
+            try:
+                logger.info("🤖 Attempting to initialize AI deduplicator...")
+                deduplicator = AdvancedAIDeduplicator()
+                logger.info("✅ AI deduplicator initialized successfully")
+                
+                # Run AI deduplication
+                logger.info(f"🚀 Starting AI-powered deduplication for {len(all_records)} records")
+                duplicates = deduplicator.find_duplicates_ai(all_records)
+                unique_records, cluster_info = deduplicator.cluster_duplicates(all_records, duplicates)
+                
+            except Exception as e:
+                logger.error(f"AI deduplication failed: {e}")
+                raise
+        else:
+            logger.warning("AI deduplication not available")
+            unique_records = all_records
+            cluster_info = {r['id']: {'cluster_id': r['id'], 'duplicate_count': 1, 'confidence': 1.0} 
+                           for r in all_records}
+        
+        # Print statistics
         logger.info("=" * 60)
         logger.info("🎯 AI Deduplication Complete!")
         logger.info(f"📊 Statistics:")
-        logger.info(f"   Total records: {self.stats['total_records']}")
-        logger.info(f"   Unique records: {self.stats['unique_records']}")
-        logger.info(f"   Duplicates removed: {self.stats['duplicates_removed']}")
-        logger.info(f"   Duplicate clusters: {self.stats['duplicate_clusters']}")
-        logger.info(f"   Processing time: {self.stats['processing_time']:.2f} seconds")
-        logger.info(f"   Match types breakdown:")
-        logger.info(f"      Semantic: {self.stats.get('semantic_matches', 0)}")
-        logger.info(f"      Phone: {self.stats.get('phone_matches', 0)}")
-        logger.info(f"      Address: {self.stats.get('address_matches', 0)}")
-        logger.info(f"      Hybrid: {self.stats.get('hybrid_matches', 0)}")
-        logger.info(f"      EPD: {self.stats.get('epd_matches', 0)}")
+        logger.info(f"   Total records: {len(all_records)}")
+        logger.info(f"   Unique records: {len(unique_records)}")
+        logger.info(f"   Duplicates removed: {len(all_records) - len(unique_records)}")
         logger.info("=" * 60)
         
-        return clean_df, self.stats
-
-
-# Fallback simple deduplication function
-def simple_deduplication(df: pd.DataFrame) -> pd.DataFrame:
-    """Simple fallback deduplication using basic fuzzy matching"""
-    logger.info("Running simple fallback deduplication")
-    
-    # Keep all existing columns and add required metadata
-    df['confidence_score'] = 1.0
-    df['merge_count'] = 1
-    df['merge_confidence'] = 1.0
-    df['merge_date'] = datetime.now().isoformat()
-    
-    # No actual deduplication in simple mode - just return all records
-    return df
-
-
-def run_deduplication_with_ai(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
-    """
-    Main entry point for deduplication process with AI.
-    
-    Args:
-        df: Input DataFrame with practice data
-        use_ai: Whether to use AI-powered deduplication
+        logger.info(f"✅ AI deduplication complete. Reduced from {len(all_records)} to {len(unique_records)} records")
         
-    Returns:
-        DataFrame with duplicates removed and merged
-    """
-    logger.info(f"🚀 Starting deduplication with {len(df)} records")
-    logger.info(f"📍 DEBUG: AI requested: {use_ai}")
-    logger.info(f"📍 DEBUG: AI libraries available: {AI_AVAILABLE}")
-    
-    if use_ai and AI_AVAILABLE:
-        logger.info(f"📍 DEBUG: Sentence transformers available: {SentenceTransformer is not None}")
-        logger.info(f"📍 DEBUG: Torch available: {torch is not None}")
-        logger.info(f"📍 DEBUG: FAISS available: {faiss is not None}")
+        # FIXED: Prepare dedupe results with ALL fields properly mapped
+        dedupe_results = []
+        for record in unique_records:
+            record_id = record.get('id')
+            record_cluster_info = cluster_info.get(record_id, {})
+            
+            # Map ALL fields from raw data to clean data format
+            result = {
+                'id': record_id,
+                'name': record.get('name', ''),
+                
+                # Try multiple address fields
+                'address': (record.get('address') or 
+                          record.get('Street Address') or 
+                          record.get('Full Address', '')),
+                
+                # Handle case variations
+                'city': record.get('City') or record.get('city', ''),
+                'state': record.get('State') or record.get('state', ''),
+                'zip': str(record.get('Zip') or record.get('zip', '')),
+                
+                # Phone field name difference
+                'phone': record.get('phone_number') or record.get('phone', ''),
+                
+                # Email might not exist
+                'email': record.get('email', ''),
+                
+                # Website field name difference  
+                'website': record.get('open_website') or record.get('website', ''),
+                
+                # Cluster information
+                'cluster_id': record_cluster_info.get('cluster_id', record_id),
+                'confidence_score': float(record_cluster_info.get('confidence', 1.0)),
+                'duplicate_count': int(record_cluster_info.get('duplicate_count', 1))
+            }
+            
+            # Clean up None values and empty strings
+            for key, value in result.items():
+                if value is None:
+                    result[key] = ''
+                elif key in ['id', 'cluster_id', 'confidence_score', 'duplicate_count']:
+                    # Keep numeric values as is
+                    continue
+                else:
+                    # Ensure strings are cleaned
+                    result[key] = str(value).strip()
+            
+            dedupe_results.append(result)
         
-        try:
-            logger.info("🤖 Attempting to initialize AI deduplicator...")
+        # Clear existing results
+        logger.info("🗑️ Clearing existing dedupe_results...")
+        supabase_client.table('dedupe_results').delete().neq('id', 0).execute()
+        
+        # Insert new results with all fields
+        if dedupe_results:
+            logger.info(f"📝 Inserting {len(dedupe_results)} deduplicated records...")
             
-            # Initialize the deduplicator
-            dedup = AdvancedAIDeduplicator(
-                semantic_model='all-mpnet-base-v2',
-                address_model='all-MiniLM-L6-v2',
-                semantic_threshold=0.80,
-                address_threshold=0.85,
-                name_threshold=0.75,
-                fuzzy_threshold=80.0,
-                batch_size=32,
-                cache_embeddings=True
-            )
+            # Log sample record to verify all fields are present
+            sample = dedupe_results[0]
+            logger.info(f"Sample record with all fields: {sample}")
+            logger.info(f"Fields included: {list(sample.keys())}")
             
-            logger.info("✅ AI deduplicator initialized successfully")
-            
-            # Run deduplication
-            clean_df, stats = dedup.deduplicate(df)
-            
-            # Add confidence score if not present
-            if 'confidence_score' not in clean_df.columns:
-                clean_df['confidence_score'] = clean_df.get('merge_confidence', 1.0)
-            
-            logger.info(f"✅ AI deduplication complete. Reduced from {len(df)} to {len(clean_df)} records")
-            return clean_df
-            
-        except Exception as e:
-            logger.error(f"❌ AI deduplication failed: {str(e)}")
-            logger.error(f"❌ Error type: {type(e).__name__}")
-            logger.error(f"❌ Full error details: {repr(e)}")
-            import traceback
-            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
-            logger.warning("⚠️ Falling back to simple deduplication")
-            return simple_deduplication(df)
-    else:
-        if use_ai and not AI_AVAILABLE:
-            logger.warning("⚠️ AI requested but libraries not available")
-        logger.info("📌 Using simple deduplication")
-        return simple_deduplication(df)
-
-
-# For backward compatibility with the main.py import
-def run_deduplication(supabase_client) -> int:
-    """Legacy function signature for compatibility with main.py"""
-    from supabase import Client
-    
-    logger.info("🔄 Running deduplication with Supabase client")
-    
-    # Fetch records from practice_records
-    result = supabase_client.table('practice_records').select('*').execute()
-    records = result.data
-    
-    if not records:
-        logger.warning("No records found to deduplicate")
-        return 0
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(records)
-    
-    # Map column names from Google Sheets format to expected format
-    # This handles the mismatch between sheet columns and database columns
-    column_mapping = {
-        'name': 'Practice Name',
-        'address': 'Practice Address',
-        'category': 'Practice Type'
-    }
-    
-    # Apply column mapping if needed
-    for sheet_col, db_col in column_mapping.items():
-        if sheet_col in df.columns and db_col not in df.columns:
-            df[db_col] = df[sheet_col]
-    
-    # Run AI deduplication
-    clean_df = run_deduplication_with_ai(df, use_ai=True)
-    
-    # Clear existing dedupe_results
-    supabase_client.table('dedupe_results').delete().neq('id', 0).execute()
-    
-    # Insert deduplicated results
-    dedupe_results = clean_df.to_dict('records')
-    
-    # Remove any columns that might cause issues with Supabase
-    columns_to_remove = ['canonical', 'norm_name', 'norm_phone']
-    for record in dedupe_results:
-        for col in columns_to_remove:
-            record.pop(col, None)
-    
-    try:
-        supabase_client.table('dedupe_results').insert(dedupe_results).execute()
+            # Insert in batches if needed
+            batch_size = 50
+            for i in range(0, len(dedupe_results), batch_size):
+                batch = dedupe_results[i:i+batch_size]
+                try:
+                    supabase_client.table('dedupe_results').insert(batch).execute()
+                    logger.info(f"✅ Inserted batch {i//batch_size + 1}: {len(batch)} records")
+                except Exception as e:
+                    logger.error(f"Error inserting batch: {e}")
+                    # Try inserting with minimal fields
+                    logger.info("Attempting insert with minimal fields...")
+                    minimal_batch = []
+                    for record in batch:
+                        minimal_record = {
+                            'id': record['id'],
+                            'name': record.get('name', ''),
+                            'address': record.get('address', ''),
+                            'city': record.get('city', ''),
+                            'state': record.get('state', ''),
+                            'zip': record.get('zip', ''),
+                            'phone': record.get('phone', ''),
+                            'website': record.get('website', ''),
+                            'confidence_score': record.get('confidence_score', 1.0)
+                        }
+                        minimal_batch.append(minimal_record)
+                    supabase_client.table('dedupe_results').insert(minimal_batch).execute()
+                    logger.info(f"✅ Inserted minimal batch {i//batch_size + 1}")
+        
+        logger.info(f"✅ Successfully saved {len(dedupe_results)} deduplicated records")
+        return len(unique_records)
+        
     except Exception as e:
-        logger.error(f"Error inserting dedupe results: {e}")
-        # Try again with minimal columns if it fails
-        minimal_results = []
-        for record in dedupe_results:
-            minimal_record = {k: v for k, v in record.items() 
-                            if k in ['Practice Name', 'Practice Address', 'City', 'State', 'Zip', 
-                                   'phone_number', 'open_website', 'confidence_score', 
-                                   'merge_count', 'merge_confidence', 'merge_date']}
-            minimal_results.append(minimal_record)
-        supabase_client.table('dedupe_results').insert(minimal_results).execute()
-    
-    return len(clean_df)
+        logger.error(f"❌ Error in deduplication: {str(e)}")
+        raise
