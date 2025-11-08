@@ -1,45 +1,68 @@
-FROM python:3.10-slim
+# Production-Ready Multi-stage Build
+ARG PYTHON_VERSION=3.10
 
-# Set working directory
-WORKDIR /app
+# Stage 1: Builder
+FROM python:${PYTHON_VERSION}-slim as builder
 
-# Install system dependencies required for AI packages
+# Install build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    python3-dev \
-    build-essential \
-    cmake \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+    gcc g++ python3-dev build-essential cmake wget git && \
+    rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip first
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy requirements file
-COPY requirements.txt .
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
 
-# Install Python dependencies with proper build tools for AI packages
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy and install requirements
+COPY requirements.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy the entire project
-COPY . .
+# Verify installations
+RUN python -c "import supabase, torch, pandas; print('Dependencies OK')"
 
-# Create necessary directories
-RUN mkdir -p /app/models /app/logs /app/data
+# Stage 2: Runtime
+FROM python:${PYTHON_VERSION}-slim
 
-# Set environment variables for Python
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONPATH=/app
+# Install runtime dependencies only
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libgomp1 libglib2.0-0 ca-certificates curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Make startup script executable
-RUN chmod +x startup.sh
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Health check (optional but recommended)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
+# Create app user
+RUN useradd -m -u 1000 appuser
 
-# Run the startup script
-CMD ["./startup.sh"]
+WORKDIR /app
+
+# Copy application
+COPY --chown=appuser:appuser . .
+
+# Create directories
+RUN mkdir -p /app/models /app/logs /app/data && \
+    chown -R appuser:appuser /app
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+# Make scripts executable
+RUN if [ -f startup.sh ]; then chmod +x startup.sh; fi
+
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
+
+# Run
+CMD ["/bin/bash", "-c", "if [ -f ./startup.sh ]; then ./startup.sh; else python main.py; fi"]
