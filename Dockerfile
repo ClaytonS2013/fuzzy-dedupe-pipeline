@@ -19,12 +19,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the sentence transformer models to include in image
-# This avoids downloading them at runtime
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-    SentenceTransformer('all-mpnet-base-v2'); \
-    SentenceTransformer('all-MiniLM-L6-v2')"
-
 # Copy application code
 COPY main.py .
 COPY sheets_sync/ ./sheets_sync/
