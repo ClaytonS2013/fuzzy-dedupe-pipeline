@@ -33,4 +33,4 @@ ENV SOURCE_TABLE=practice_records \
     BATCH_SIZE=5000
 
 # Run the startup script (which creates service_account.json and starts the app)
-CMD ["./startup.sh"]
+CMD ["/bin/bash", "./startup.sh"]
