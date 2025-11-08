@@ -1,10 +1,14 @@
-# Prevent unnecessary files from being copied to Docker image
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyc
+*.class
 .env
 .git/
 .gitignore
 README.md
 .DS_Store
 *.log
+
+# Explicitly include these folders
+!sheets_sync/
+!sheets_sync/**
