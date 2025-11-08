@@ -1,0 +1,3 @@
+# This directory stores AI model cache files
+# Models are downloaded automatically on first use
+# Actual model files (*.bin, *.pt, *.safetensors) should not be committed to Git
