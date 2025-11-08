@@ -1,264 +1,195 @@
 """
-Sheets Sync Module - Core Synchronization Functions
+Google Sheets and Supabase synchronization module
 Handles bidirectional sync between Google Sheets and Supabase
 """
 
 import os
-import json
-import base64
 import logging
-from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
-from supabase import create_client
+from typing import Dict, List, Any
+import traceback
 
 logger = logging.getLogger(__name__)
 
-
-def init_google_sheets_client():
-    """Initialize Google Sheets client with service account credentials"""
-    try:
-        # Get credentials from environment
-        creds_b64 = os.getenv('GOOGLE_CREDENTIALS')
-        
-        if not creds_b64:
-            raise ValueError("GOOGLE_CREDENTIALS environment variable not set")
-        
-        # Check if credentials are base64 encoded
-        try:
-            # Try to decode as base64
-            logger.info("🔑 Creating service account file from base64 credentials...")
-            creds_json = base64.b64decode(creds_b64).decode('utf-8')
-            logger.info("✅ Service account file created")
-        except Exception:
-            # If not base64, assume it's already JSON string
-            logger.info("🔑 Using credentials as JSON string...")
-            creds_json = creds_b64
-        
-        # Parse credentials
-        creds_dict = json.loads(creds_json)
-        
-        # Create credentials object
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
-        
-        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        
-        # Initialize gspread client
-        client = gspread.authorize(credentials)
-        
-        logger.info("✅ Google Sheets client initialized successfully")
-        return client
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Google Sheets client: {e}")
-        raise
-
-
-def init_supabase_client():
-    """Initialize Supabase client"""
-    try:
-        supabase_url = os.getenv('SUPABASE_URL')
-        supabase_key = os.getenv('SUPABASE_KEY')
-        
-        if not supabase_url or not supabase_key:
-            raise ValueError("SUPABASE_URL or SUPABASE_KEY not set")
-        
-        client = create_client(supabase_url, supabase_key)
-        logger.info("✅ Supabase client initialized successfully")
-        
-        return client
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Supabase client: {e}")
-        raise
-
-
-def sync_sheets_to_supabase(sheets_client, supabase_client, batch_size=100):
+def sync_sheets_to_supabase(sheets_client, supabase_client) -> int:
     """
     Sync data from Google Sheets to Supabase
-    
-    Args:
-        sheets_client: Initialized gspread client
-        supabase_client: Initialized Supabase client
-        batch_size: Number of records to insert per batch
-        
-    Returns:
-        int: Number of records synced
+    Returns number of records processed
     """
-    logger.info("📥 Starting Google Sheets → Supabase sync...")
-    
     try:
-        # Open spreadsheet
-        spreadsheet_id = os.getenv('SPREADSHEET_ID')
-        spreadsheet = sheets_client.open_by_key(spreadsheet_id)
+        logger.info("Starting Google Sheets to Supabase sync...")
         
-        # Get the "Raw_Practices" worksheet
-        worksheet = spreadsheet.worksheet('Raw_Practices')
+        # Get spreadsheet ID from environment
+        spreadsheet_id = os.getenv('SPREADSHEET_ID')
+        sheet_name = os.getenv('SHEET_NAME', 'Raw_Practices')
+        
+        # Open the spreadsheet
+        spreadsheet = sheets_client.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(sheet_name)
         
         # Get all records
         records = worksheet.get_all_records()
-        logger.info(f"📊 Found {len(records)} rows in Raw_Practices")
+        logger.info(f"Found {len(records)} rows in {sheet_name}")
         
         if not records:
-            logger.warning("⚠️ No records found in Google Sheets")
+            logger.warning("No records found in sheet")
             return 0
         
         # Clear existing records in Supabase
-        logger.info("🗑️ Clearing existing practice_records...")
-        try:
-            supabase_client.table('practice_records').delete().neq('id', 0).execute()
-        except Exception as e:
-            logger.warning(f"⚠️ Could not clear existing records: {e}")
+        logger.info("Clearing existing practice_records...")
+        supabase_client.table('practice_records').delete().neq('id', 0).execute()
         
-        # Convert records to proper format
-        # Handle potential column name variations
-        processed_records = []
-        for record in records:
-            # Create a clean record dict, handling common column name patterns
-            clean_record = {}
-            for key, value in record.items():
-                # Convert column names to lowercase with underscores
-                clean_key = key.lower().replace(' ', '_').replace('-', '_')
-                
-                # Skip empty values
-                if value == '':
-                    clean_record[clean_key] = None
-                else:
-                    clean_record[clean_key] = value
-            
-            processed_records.append(clean_record)
-        
-        # Insert in batches
+        # Prepare records for insertion
+        batch_size = 50
         total_inserted = 0
-        for i in range(0, len(processed_records), batch_size):
-            batch = processed_records[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
-            
-            try:
-                response = supabase_client.table('practice_records').insert(batch).execute()
-                inserted_count = len(batch)
-                total_inserted += inserted_count
-                logger.info(f"✅ Inserted batch {batch_num}: {inserted_count} records")
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to insert batch {batch_num}: {e}")
-                # Log the structure of the first record for debugging
-                if batch:
-                    logger.error(f"🔍 Sample record structure: {list(batch[0].keys())}")
-                raise
         
-        logger.info(f"✅ Sheets → Supabase sync completed: {total_inserted} records")
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i+batch_size]
+            
+            # Transform records to match database schema
+            transformed_batch = []
+            for record in batch:
+                transformed_record = transform_record_for_db(record)
+                if transformed_record:
+                    transformed_batch.append(transformed_record)
+            
+            if transformed_batch:
+                try:
+                    response = supabase_client.table('practice_records').insert(transformed_batch).execute()
+                    total_inserted += len(transformed_batch)
+                    logger.info(f"Inserted batch {i//batch_size + 1}: {len(transformed_batch)} records")
+                except Exception as e:
+                    logger.error(f"Failed to insert batch {i//batch_size + 1}: {str(e)}")
+                    if records:
+                        logger.error(f"Sample record structure: {list(records[0].keys())}")
+                    raise
+        
+        logger.info(f"Sheets to Supabase sync completed: {total_inserted} records")
         return total_inserted
         
     except Exception as e:
-        logger.error(f"❌ Sheets → Supabase sync failed: {e}")
+        logger.error(f"Sheets to Supabase sync failed: {str(e)}")
         raise
 
-
-def sync_supabase_to_sheets(sheets_client, supabase_client):
+def transform_record_for_db(record: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Sync deduplicated data from Supabase back to Google Sheets
-    
-    Args:
-        sheets_client: Initialized gspread client
-        supabase_client: Initialized Supabase client
-        
-    Returns:
-        int: Number of rows written
+    Transform a record from Google Sheets format to database format
+    Handle column name mappings and data type conversions
     """
-    logger.info("📤 Starting Supabase → Google Sheets writeback...")
-    
     try:
-        # Fetch dedupe results from Supabase
-        logger.info("🔍 Fetching dedupe_results from Supabase...")
-        response = supabase_client.table('dedupe_results').select('*').execute()
+        transformed = {}
+        
+        # Direct mappings (all as TEXT in database now)
+        column_mappings = {
+            'epd#': 'epd#',
+            'place_id': 'place_id',
+            'url': 'url',
+            'country': 'country',
+            'name': 'name',
+            'category': 'category',
+            'address': 'address',
+            'full_address': 'full_address',
+            'street_address': 'street_address',
+            'street_address_two': 'street_address_two',
+            'city': 'city',
+            'state': 'state',
+            'zip': 'zip',
+            'open_hours': 'open_hours',
+            'reviews_count': 'reviews_count',
+            'rating': 'rating',
+            'main_image': 'main_image',
+            'reviews': 'reviews',
+            'lat': 'lat',
+            'lon': 'lon',
+            'open_website': 'open_website',
+            'phone_number': 'phone_number',
+            'permanently_closed': 'permanently_closed',
+            'photos_and_videos': 'photos_and_videos',
+            'cid_location': 'cid_location',
+            'is_claimed': 'is_claimed',
+            'fid_location': 'fid_location',
+            'review_distribution': 'review_distribution',
+            'clay_changed': 'clay_changed',
+            'change_needed': 'change_needed',
+            'confidence': 'confidence',
+            'status': 'status',
+            'practice_type': 'practice_type',
+            'suggested_fix': 'suggested_fix',
+            'canonical': 'canonical',
+            'reasoning': 'reasoning',
+            'cluster_id': 'cluster_id'
+        }
+        
+        for sheet_col, db_col in column_mappings.items():
+            if sheet_col in record:
+                value = record[sheet_col]
+                # Convert everything to string or None
+                if value is None or value == '' or str(value).lower() in ['nan', 'none']:
+                    transformed[db_col] = None
+                else:
+                    # Everything is TEXT in the database now
+                    transformed[db_col] = str(value)
+        
+        return transformed
+        
+    except Exception as e:
+        logger.error(f"Failed to transform record: {str(e)}")
+        logger.error(f"   Record: {record}")
+        return None
+
+def sync_supabase_to_sheets(supabase_client, sheets_client) -> int:
+    """
+    Sync dedupe results from Supabase back to Google Sheets
+    Returns number of records written
+    """
+    try:
+        logger.info("Starting Supabase to Google Sheets writeback...")
+        
+        # Fetch dedupe results
+        logger.info("Fetching dedupe_results from Supabase...")
+        response = supabase_client.table('dedupe_results').select("*").execute()
         results = response.data
         
-        logger.info(f"📊 Found {len(results)} dedupe results")
+        logger.info(f"Found {len(results)} dedupe results")
         
         if not results:
-            logger.warning("⚠️ No dedupe results found")
+            logger.warning("No dedupe results found")
             return 0
         
-        # Open spreadsheet
+        # Get spreadsheet
         spreadsheet_id = os.getenv('SPREADSHEET_ID')
         spreadsheet = sheets_client.open_by_key(spreadsheet_id)
         
-        # Get or create "Clean Data" worksheet
+        # Get or create Clean Data worksheet
         try:
             worksheet = spreadsheet.worksheet('Clean Data')
-        except gspread.exceptions.WorksheetNotFound:
-            logger.info("📝 Creating 'Clean Data' worksheet...")
-            worksheet = spreadsheet.add_worksheet(title='Clean Data', rows=1000, cols=26)
+            logger.info("Clearing Clean Data worksheet...")
+            worksheet.clear()
+        except:
+            logger.info("Creating Clean Data worksheet...")
+            worksheet = spreadsheet.add_worksheet(title='Clean Data', rows=1000, cols=20)
         
-        # Clear existing data
-        logger.info("🗑️ Clearing Clean Data worksheet...")
-        worksheet.clear()
+        # Prepare headers
+        headers = ['id', 'name', 'address', 'city', 'state', 'zip', 
+                  'phone', 'email', 'website', 'cluster_id', 'confidence_score', 'duplicate_count']
         
-        # Prepare data for writing
-        if results:
-            # Get column headers from first record
-            headers = list(results[0].keys())
-            
-            # Convert results to list of lists
-            rows = [headers]  # Header row
-            for result in results:
-                row = [result.get(header, '') for header in headers]
-                rows.append(row)
-            
-            # Write to sheet
-            logger.info(f"✍️ Writing {len(rows)} rows to Clean Data worksheet...")
-            worksheet.update('A1', rows)
-            
-            logger.info(f"✅ Supabase → Google Sheets writeback completed: {len(results)} records")
-            return len(results)
+        # Prepare data rows
+        data_rows = [headers]
+        for result in results:
+            row = []
+            for header in headers:
+                value = result.get(header, '')
+                # Convert None to empty string for Sheets
+                row.append('' if value is None else str(value))
+            data_rows.append(row)
         
-        return 0
+        # Write to sheet
+        logger.info(f"Writing {len(data_rows)} rows to Clean Data worksheet...")
+        worksheet.update('A1', data_rows)
+        
+        logger.info(f"Supabase to Google Sheets writeback completed: {len(results)} records")
+        return len(results)
         
     except Exception as e:
-        logger.error(f"❌ Supabase → Google Sheets writeback failed: {e}")
+        logger.error(f"Supabase to Google Sheets writeback failed: {str(e)}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
         raise
-
-
-# Utility functions
-
-def get_sheet_columns(sheets_client, worksheet_name='Raw_Practices'):
-    """Get column names from a Google Sheet"""
-    try:
-        spreadsheet_id = os.getenv('SPREADSHEET_ID')
-        spreadsheet = sheets_client.open_by_key(spreadsheet_id)
-        worksheet = spreadsheet.worksheet(worksheet_name)
-        
-        # Get first row (headers)
-        headers = worksheet.row_values(1)
-        return headers
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get sheet columns: {e}")
-        return []
-
-
-def validate_sheet_structure(sheets_client, required_columns):
-    """Validate that Google Sheet has all required columns"""
-    try:
-        actual_columns = get_sheet_columns(sheets_client)
-        
-        # Convert to lowercase for comparison
-        actual_lower = [col.lower().replace(' ', '_') for col in actual_columns]
-        required_lower = [col.lower() for col in required_columns]
-        
-        missing = [col for col in required_lower if col not in actual_lower]
-        
-        if missing:
-            logger.warning(f"⚠️ Missing columns in Google Sheet: {missing}")
-            return False
-        
-        logger.info("✅ Sheet structure validated")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to validate sheet structure: {e}")
-        return False
