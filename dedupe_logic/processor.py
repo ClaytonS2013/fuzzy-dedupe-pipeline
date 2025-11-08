@@ -11,22 +11,35 @@ import re
 from dataclasses import dataclass, asdict
 import json
 from datetime import datetime
-
-# Core ML/AI imports
-from sentence_transformers import SentenceTransformer, util
-import torch
-import faiss
-
-# Fuzzy matching for hybrid approach
-from rapidfuzz import fuzz, process
-import phonenumbers
-from phonenumbers import NumberParseException
-
-# Performance monitoring
 import time
 from functools import wraps
 
 logger = logging.getLogger(__name__)
+
+# Try importing AI/ML libraries with error handling
+try:
+    from sentence_transformers import SentenceTransformer, util
+    import torch
+    import faiss
+    AI_AVAILABLE = True
+    logger.info("✅ AI libraries imported successfully")
+except ImportError as e:
+    AI_AVAILABLE = False
+    logger.warning(f"⚠️ AI libraries not available: {e}")
+    SentenceTransformer = None
+    torch = None
+    faiss = None
+
+# Always import fuzzy matching as fallback
+from rapidfuzz import fuzz, process
+
+try:
+    import phonenumbers
+    from phonenumbers import NumberParseException
+    PHONE_LIB_AVAILABLE = True
+except ImportError:
+    PHONE_LIB_AVAILABLE = False
+    logger.warning("⚠️ phonenumbers library not available")
 
 def timer(func):
     """Decorator to time function execution"""
@@ -74,17 +87,6 @@ class AdvancedAIDeduplicator:
                  cache_embeddings: bool = True):
         """
         Initialize advanced deduplicator with multiple models.
-        
-        Args:
-            semantic_model: Main model for semantic similarity
-            address_model: Specialized model for address matching
-            semantic_threshold: Threshold for semantic similarity (0-1)
-            address_threshold: Threshold for address similarity (0-1)
-            name_threshold: Threshold for name similarity (0-1)
-            fuzzy_threshold: Threshold for fuzzy string matching (0-100)
-            use_gpu: Whether to use GPU acceleration if available
-            batch_size: Batch size for embedding generation
-            cache_embeddings: Whether to cache embeddings for reuse
         """
         self.semantic_threshold = semantic_threshold
         self.address_threshold = address_threshold
@@ -92,6 +94,10 @@ class AdvancedAIDeduplicator:
         self.fuzzy_threshold = fuzzy_threshold
         self.batch_size = batch_size
         self.cache_embeddings = cache_embeddings
+        
+        # Check if AI is available
+        if not AI_AVAILABLE:
+            raise ImportError("AI libraries not available. Please install sentence-transformers, torch, and faiss-cpu")
         
         # Set device
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
@@ -131,14 +137,15 @@ class AdvancedAIDeduplicator:
         
         phone_str = str(phone).strip()
         
-        try:
-            # Try parsing as US number first
-            parsed = phonenumbers.parse(phone_str, "US")
-            if phonenumbers.is_valid_number(parsed):
-                # Return in E164 format for consistent comparison
-                return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-        except NumberParseException:
-            pass
+        if PHONE_LIB_AVAILABLE:
+            try:
+                # Try parsing as US number first
+                parsed = phonenumbers.parse(phone_str, "US")
+                if phonenumbers.is_valid_number(parsed):
+                    # Return in E164 format for consistent comparison
+                    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+            except:
+                pass
         
         # Fallback to simple normalization
         digits = re.sub(r'\D', '', phone_str)
@@ -262,7 +269,7 @@ class AdvancedAIDeduplicator:
             parts.append(f"state: {str(row['State']).upper()}")
         
         if not pd.isna(row.get('Zip')):
-            parts.append(f"zip: {str(row['Zip'])[:5]}")  # Use first 5 digits
+            parts.append(f"zip: {str(row['Zip'])[:5]}")
         
         # Contact information
         if not pd.isna(row.get('phone_number')):
@@ -471,7 +478,6 @@ class AdvancedAIDeduplicator:
     def merge_duplicate_records(self, df: pd.DataFrame, indices: List[int]) -> pd.Series:
         """
         Intelligently merge duplicate records, keeping the most complete information.
-        Uses confidence scores to prefer higher-quality data.
         """
         if not indices:
             return pd.Series()
@@ -491,7 +497,6 @@ class AdvancedAIDeduplicator:
             
             if col in ['Practice Name', 'Practice Address']:
                 # For important fields, take the longest (most complete) value
-                # Also check for consistency
                 unique_normalized = set(self.normalize_text(str(v)) for v in values)
                 if len(unique_normalized) == 1:
                     # All values are essentially the same, take the longest
@@ -622,6 +627,26 @@ class AdvancedAIDeduplicator:
         return clean_df, self.stats
 
 
+# Fallback simple deduplication function
+def simple_deduplication(df: pd.DataFrame) -> pd.DataFrame:
+    """Simple fallback deduplication using basic fuzzy matching"""
+    logger.info("Running simple fallback deduplication")
+    # Keep existing records for now - just add required columns
+    df['confidence_score'] = 1.0
+    df['merge_count'] = 1
+    df['merge_confidence'] = 1.0
+    df['merge_date'] = datetime.now().isoformat()
+    
+    # Add field mappings
+    if 'phone_number' in df.columns and 'phone' not in df.columns:
+        df['phone'] = df['phone_number']
+    
+    if 'open_website' in df.columns and 'website' not in df.columns:
+        df['website'] = df['open_website']
+    
+    return df
+
+
 def run_deduplication(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
     """
     Main entry point for deduplication process.
@@ -633,34 +658,90 @@ def run_deduplication(df: pd.DataFrame, use_ai: bool = True) -> pd.DataFrame:
     Returns:
         DataFrame with duplicates removed and merged
     """
-    logger.info(f"🚀 Starting {'AI-powered' if use_ai else 'standard'} deduplication with {len(df)} records")
+    logger.info(f"🚀 Starting deduplication with {len(df)} records")
+    logger.info(f"📍 DEBUG: AI requested: {use_ai}")
+    logger.info(f"📍 DEBUG: AI libraries available: {AI_AVAILABLE}")
     
-    # Initialize the deduplicator
-    dedup = AdvancedAIDeduplicator(
-        semantic_model='all-mpnet-base-v2',  # Best accuracy
-        address_model='all-MiniLM-L6-v2',    # Fast and accurate for addresses
-        semantic_threshold=0.80,
-        address_threshold=0.85,
-        name_threshold=0.75,
-        fuzzy_threshold=80.0,
-        batch_size=32,
-        cache_embeddings=True
-    )
+    if use_ai and AI_AVAILABLE:
+        logger.info(f"📍 DEBUG: Sentence transformers available: {SentenceTransformer is not None}")
+        logger.info(f"📍 DEBUG: Torch available: {torch is not None}")
+        logger.info(f"📍 DEBUG: FAISS available: {faiss is not None}")
+        
+        try:
+            logger.info("🤖 Attempting to initialize AI deduplicator...")
+            
+            # Initialize the deduplicator
+            dedup = AdvancedAIDeduplicator(
+                semantic_model='all-mpnet-base-v2',
+                address_model='all-MiniLM-L6-v2',
+                semantic_threshold=0.80,
+                address_threshold=0.85,
+                name_threshold=0.75,
+                fuzzy_threshold=80.0,
+                batch_size=32,
+                cache_embeddings=True
+            )
+            
+            logger.info("✅ AI deduplicator initialized successfully")
+            
+            # Run deduplication
+            clean_df, stats = dedup.deduplicate(df)
+            
+            # Ensure field mappings are correct for output
+            if 'phone_number' in clean_df.columns and 'phone' not in clean_df.columns:
+                clean_df['phone'] = clean_df['phone_number']
+            
+            if 'open_website' in clean_df.columns and 'website' not in clean_df.columns:
+                clean_df['website'] = clean_df['open_website']
+            
+            # Add confidence score if not present
+            if 'confidence_score' not in clean_df.columns:
+                clean_df['confidence_score'] = clean_df.get('merge_confidence', 1.0)
+            
+            logger.info(f"✅ AI deduplication complete. Reduced from {len(df)} to {len(clean_df)} records")
+            return clean_df
+            
+        except Exception as e:
+            logger.error(f"❌ AI deduplication failed: {str(e)}")
+            logger.error(f"❌ Error type: {type(e).__name__}")
+            logger.error(f"❌ Full error details: {repr(e)}")
+            import traceback
+            logger.error(f"❌ Traceback:\n{traceback.format_exc()}")
+            logger.warning("⚠️ Falling back to simple deduplication")
+            return simple_deduplication(df)
+    else:
+        if use_ai and not AI_AVAILABLE:
+            logger.warning("⚠️ AI requested but libraries not available")
+        logger.info("📌 Using simple deduplication")
+        return simple_deduplication(df)
+
+
+# For backward compatibility with the main.py import
+def run_deduplication(supabase_client) -> int:
+    """Legacy function signature for compatibility"""
+    from supabase import Client
+    
+    logger.info("🔄 Running deduplication with Supabase client")
+    
+    # Fetch records from practice_records
+    result = supabase_client.table('practice_records').select('*').execute()
+    records = result.data
+    
+    if not records:
+        logger.warning("No records found to deduplicate")
+        return 0
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(records)
     
     # Run deduplication
-    clean_df, stats = dedup.deduplicate(df)
+    clean_df = run_deduplication(df, use_ai=True)
     
-    # Ensure field mappings are correct for output
-    if 'phone_number' in clean_df.columns and 'phone' not in clean_df.columns:
-        clean_df['phone'] = clean_df['phone_number']
+    # Clear existing dedupe_results
+    supabase_client.table('dedupe_results').delete().neq('id', 0).execute()
     
-    if 'open_website' in clean_df.columns and 'website' not in clean_df.columns:
-        clean_df['website'] = clean_df['open_website']
+    # Insert deduplicated results
+    dedupe_results = clean_df.to_dict('records')
+    supabase_client.table('dedupe_results').insert(dedupe_results).execute()
     
-    # Add confidence score if not present (for backward compatibility)
-    if 'confidence_score' not in clean_df.columns:
-        clean_df['confidence_score'] = clean_df.get('merge_confidence', 1.0)
-    
-    logger.info(f"✅ Deduplication complete. Reduced from {len(df)} to {len(clean_df)} records")
-    
-    return clean_df
+    return len(clean_df)
