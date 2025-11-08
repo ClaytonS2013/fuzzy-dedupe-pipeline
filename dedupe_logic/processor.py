@@ -1,5 +1,5 @@
 """
-Advanced AI-powered deduplication processor with FIXED field mapping
+Advanced AI-powered deduplication processor with COMPLETE field mapping fix
 """
 import logging
 from typing import List, Dict, Any, Optional, Tuple
@@ -261,7 +261,7 @@ class AdvancedAIDeduplicator:
 
 
 def run_deduplication(supabase_client):
-    """Run deduplication process with FIXED field mapping."""
+    """Run deduplication process with COMPLETE field mapping fix."""
     try:
         # Fetch all practice records
         response = supabase_client.table('practice_records').select("*").execute()
@@ -306,35 +306,106 @@ def run_deduplication(supabase_client):
         
         logger.info(f"✅ AI deduplication complete. Reduced from {len(all_records)} to {len(unique_records)} records")
         
-        # FIXED: Prepare dedupe results with ALL fields properly mapped
+        # COMPLETE FIX: Prepare dedupe results with proper field extraction and mapping
         dedupe_results = []
         for record in unique_records:
             record_id = record.get('id')
             record_cluster_info = cluster_info.get(record_id, {})
             
-            # Map ALL fields from raw data to clean data format
+            # Debug: Log first record's fields to understand structure
+            if len(dedupe_results) == 0:
+                logger.info(f"📋 Available fields in first record: {list(record.keys())[:20]}")  # Show first 20 fields
+            
+            # Extract city, state, zip with better logic
+            city_value = ''
+            state_value = ''
+            zip_value = ''
+            
+            # Try to get city, state, zip from individual fields first (with capital letters)
+            city_value = str(record.get('City', '') or record.get('city', '') or '').strip()
+            state_value = str(record.get('State', '') or record.get('state', '') or '').strip()
+            zip_value = str(record.get('Zip', '') or record.get('zip', '') or '').strip()
+            
+            # Clean up bad values
+            if zip_value.lower() in ['none', 'nan', 'null', '']:
+                zip_value = ''
+            if city_value.lower() in ['none', 'nan', 'null']:
+                city_value = ''
+            if state_value.lower() in ['none', 'nan', 'null']:
+                state_value = ''
+            
+            # If any are missing, try to extract from address
+            if not all([city_value, state_value, zip_value]):
+                # Try Full Address or address field
+                full_addr = record.get('Full Address', '') or record.get('address', '') or ''
+                
+                if full_addr:
+                    # Extract ZIP code using regex
+                    if not zip_value:
+                        zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', str(full_addr))
+                        if zip_match:
+                            zip_value = zip_match.group(1)
+                    
+                    # Try to parse city and state from address
+                    # Format usually: "Street, City, State ZIP"
+                    addr_parts = str(full_addr).split(',')
+                    if len(addr_parts) >= 3:
+                        # Extract city if not already found
+                        if not city_value and len(addr_parts) >= 2:
+                            potential_city = addr_parts[-2].strip()
+                            if potential_city and not any(char.isdigit() for char in potential_city[:3]):
+                                city_value = potential_city
+                        
+                        # Extract state if not already found
+                        if not state_value and len(addr_parts) >= 1:
+                            last_part = addr_parts[-1].strip()
+                            # Look for state abbreviation (2 capital letters)
+                            state_match = re.search(r'\b([A-Z]{2})\b', last_part)
+                            if state_match:
+                                state_value = state_match.group(1)
+            
+            # Build the cleaned result record
             result = {
                 'id': record_id,
-                'name': record.get('name', ''),
                 
-                # Try multiple address fields
-                'address': (record.get('address') or 
-                          record.get('Street Address') or 
-                          record.get('Full Address', '')),
+                # Name - straightforward
+                'name': str(record.get('name', '') or '').strip(),
                 
-                # Handle case variations
-                'city': record.get('City') or record.get('city', ''),
-                'state': record.get('State') or record.get('state', ''),
-                'zip': str(record.get('Zip') or record.get('zip', '')),
+                # Address - try multiple field names
+                'address': str(
+                    record.get('address') or 
+                    record.get('Street Address') or 
+                    record.get('Full Address') or 
+                    ''
+                ).strip(),
                 
-                # Phone field name difference
-                'phone': record.get('phone_number') or record.get('phone', ''),
+                # Geographic fields with extraction logic
+                'city': city_value,
+                'state': state_value,
+                'zip': zip_value,
                 
-                # Email might not exist
-                'email': record.get('email', ''),
+                # Phone - note the field name is phone_number in source
+                'phone': str(
+                    record.get('phone_number') or 
+                    record.get('phone') or 
+                    ''
+                ).strip(),
                 
-                # Website field name difference  
-                'website': record.get('open_website') or record.get('website', ''),
+                # Email - likely doesn't exist in veterinary data but check anyway
+                'email': str(
+                    record.get('email') or 
+                    record.get('Email') or 
+                    record.get('email_address') or 
+                    ''
+                ).strip(),
+                
+                # Website - field name is open_website in source
+                'website': str(
+                    record.get('open_website') or 
+                    record.get('website') or 
+                    record.get('url') or 
+                    ''
+                ).strip(),
                 
                 # Cluster information
                 'cluster_id': record_cluster_info.get('cluster_id', record_id),
@@ -342,18 +413,34 @@ def run_deduplication(supabase_client):
                 'duplicate_count': int(record_cluster_info.get('duplicate_count', 1))
             }
             
-            # Clean up None values and empty strings
+            # Final cleanup - remove any remaining 'None' string values
             for key, value in result.items():
-                if value is None:
-                    result[key] = ''
-                elif key in ['id', 'cluster_id', 'confidence_score', 'duplicate_count']:
-                    # Keep numeric values as is
-                    continue
-                else:
-                    # Ensure strings are cleaned
-                    result[key] = str(value).strip()
+                if isinstance(value, str):
+                    # Remove None/nan/null strings
+                    if value.lower() in ['none', 'nan', 'null']:
+                        result[key] = ''
+                    # Remove #ERROR! values
+                    elif value == '#ERROR!':
+                        result[key] = ''
             
             dedupe_results.append(result)
+        
+        # Log sample record after mapping to verify
+        if dedupe_results:
+            sample = dedupe_results[0]
+            logger.info(f"📊 Sample record after complete field mapping:")
+            logger.info(f"  ID: {sample['id']}")
+            logger.info(f"  Name: {sample['name']}")
+            logger.info(f"  Address: {sample['address']}")
+            logger.info(f"  City: {sample['city']}")
+            logger.info(f"  State: {sample['state']}")
+            logger.info(f"  Zip: {sample['zip']}")
+            logger.info(f"  Phone: {sample['phone']}")
+            logger.info(f"  Email: {sample['email']}")
+            logger.info(f"  Website: {sample['website']}")
+            logger.info(f"  Cluster ID: {sample['cluster_id']}")
+            logger.info(f"  Confidence: {sample['confidence_score']}")
+            logger.info(f"  Duplicate Count: {sample['duplicate_count']}")
         
         # Clear existing results
         logger.info("🗑️ Clearing existing dedupe_results...")
@@ -362,11 +449,6 @@ def run_deduplication(supabase_client):
         # Insert new results with all fields
         if dedupe_results:
             logger.info(f"📝 Inserting {len(dedupe_results)} deduplicated records...")
-            
-            # Log sample record to verify all fields are present
-            sample = dedupe_results[0]
-            logger.info(f"Sample record with all fields: {sample}")
-            logger.info(f"Fields included: {list(sample.keys())}")
             
             # Insert in batches if needed
             batch_size = 50
@@ -377,24 +459,8 @@ def run_deduplication(supabase_client):
                     logger.info(f"✅ Inserted batch {i//batch_size + 1}: {len(batch)} records")
                 except Exception as e:
                     logger.error(f"Error inserting batch: {e}")
-                    # Try inserting with minimal fields
-                    logger.info("Attempting insert with minimal fields...")
-                    minimal_batch = []
-                    for record in batch:
-                        minimal_record = {
-                            'id': record['id'],
-                            'name': record.get('name', ''),
-                            'address': record.get('address', ''),
-                            'city': record.get('city', ''),
-                            'state': record.get('state', ''),
-                            'zip': record.get('zip', ''),
-                            'phone': record.get('phone', ''),
-                            'website': record.get('website', ''),
-                            'confidence_score': record.get('confidence_score', 1.0)
-                        }
-                        minimal_batch.append(minimal_record)
-                    supabase_client.table('dedupe_results').insert(minimal_batch).execute()
-                    logger.info(f"✅ Inserted minimal batch {i//batch_size + 1}")
+                    logger.error(f"First record in failed batch: {batch[0] if batch else 'empty batch'}")
+                    raise
         
         logger.info(f"✅ Successfully saved {len(dedupe_results)} deduplicated records")
         return len(unique_records)
