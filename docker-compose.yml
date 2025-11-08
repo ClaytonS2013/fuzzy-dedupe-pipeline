@@ -1,82 +1,10 @@
-version: '3.8'
-
 services:
   fuzzy-dedupe:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: fuzzy-dedupe-pipeline:latest
-    container_name: fuzzy-dedupe-pipeline
-    restart: unless-stopped
-    
-    env_file:
-      - .env
+    # ... existing config ...
     
     environment:
       - PYTHONUNBUFFERED=1
       - ENVIRONMENT=production
-    
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models:/app/models
-    
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
-
----
-
-### **File 5: `.dockerignore`** (NEW FILE)
-```
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.Python
-env/
-venv/
-.venv/
-*.egg-info/
-*.egg
-
-# IDE
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Git
-.git/
-.gitignore
-
-# Docker
-Dockerfile*
-docker-compose*.yml
-
-# Environment
-.env
-.env.*
-!.env.example
-
-# Data
-*.db
-*.sqlite
-logs/
-data/
-models/
+      - ENABLE_AI_FEATURES=true  # ADD THIS
+      - AI_MODEL_CACHE=/app/models  # ADD THIS
+      - TRANSFORMERS_CACHE=/app/models  # ADD THIS
