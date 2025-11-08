@@ -76,13 +76,13 @@ def init_supabase_client():
         raise
 
 
-def sync_sheets_to_supabase(sheets_client, supabase, batch_size=100):
+def sync_sheets_to_supabase(sheets_client, supabase_client, batch_size=100):
     """
     Sync data from Google Sheets to Supabase
     
     Args:
         sheets_client: Initialized gspread client
-        supabase: Initialized Supabase client
+        supabase_client: Initialized Supabase client
         batch_size: Number of records to insert per batch
         
     Returns:
@@ -109,7 +109,7 @@ def sync_sheets_to_supabase(sheets_client, supabase, batch_size=100):
         # Clear existing records in Supabase
         logger.info("🗑️ Clearing existing practice_records...")
         try:
-            supabase.table('practice_records').delete().neq('id', 0).execute()
+            supabase_client.table('practice_records').delete().neq('id', 0).execute()
         except Exception as e:
             logger.warning(f"⚠️ Could not clear existing records: {e}")
         
@@ -138,7 +138,7 @@ def sync_sheets_to_supabase(sheets_client, supabase, batch_size=100):
             batch_num = (i // batch_size) + 1
             
             try:
-                response = supabase.table('practice_records').insert(batch).execute()
+                response = supabase_client.table('practice_records').insert(batch).execute()
                 inserted_count = len(batch)
                 total_inserted += inserted_count
                 logger.info(f"✅ Inserted batch {batch_num}: {inserted_count} records")
@@ -158,13 +158,13 @@ def sync_sheets_to_supabase(sheets_client, supabase, batch_size=100):
         raise
 
 
-def sync_supabase_to_sheets(sheets_client, supabase):
+def sync_supabase_to_sheets(sheets_client, supabase_client):
     """
     Sync deduplicated data from Supabase back to Google Sheets
     
     Args:
         sheets_client: Initialized gspread client
-        supabase: Initialized Supabase client
+        supabase_client: Initialized Supabase client
         
     Returns:
         int: Number of rows written
@@ -174,7 +174,7 @@ def sync_supabase_to_sheets(sheets_client, supabase):
     try:
         # Fetch dedupe results from Supabase
         logger.info("🔍 Fetching dedupe_results from Supabase...")
-        response = supabase.table('dedupe_results').select('*').execute()
+        response = supabase_client.table('dedupe_results').select('*').execute()
         results = response.data
         
         logger.info(f"📊 Found {len(results)} dedupe results")
