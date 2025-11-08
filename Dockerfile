@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy the application code
 COPY main.py ./
+COPY sheets_sync/ ./sheets_sync/
 
 # Set default environment variables
 ENV SOURCE_TABLE=practice_records \
