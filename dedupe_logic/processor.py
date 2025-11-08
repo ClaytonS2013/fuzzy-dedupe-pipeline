@@ -8,6 +8,7 @@ import json
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +80,22 @@ def deduplicate_records(df: pd.DataFrame) -> List[Dict]:
     
     # Strategy 1: Exact name matching (case-insensitive)
     df = apply_name_matching(df, cluster_id)
-    cluster_id = df['cluster_id'].max() + 1 if df['cluster_id'].notna().any() else cluster_id
+    # Fix for cluster_id increment
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
     
     # Strategy 2: Address matching
     df = apply_address_matching(df, cluster_id)
-    cluster_id = df['cluster_id'].max() + 1 if df['cluster_id'].notna().any() else cluster_id
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
     
     # Strategy 3: Phone number matching
     df = apply_phone_matching(df, cluster_id)
-    cluster_id = df['cluster_id'].max() + 1 if df['cluster_id'].notna().any() else cluster_id
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
     
     # Strategy 4: Email domain matching
     df = apply_email_matching(df, cluster_id)
@@ -109,7 +117,7 @@ def apply_name_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
             continue
             
         name = str(row.get('name', '')).lower().strip()
-        if not name:
+        if not name or name == 'nan':
             continue
             
         # Find similar names
@@ -173,8 +181,9 @@ def apply_phone_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
     for idx, row in df.iterrows():
         if pd.notna(row.get('cluster_id')):
             continue
-            
-        phone = normalize_phone(str(row.get('phone', '')))
+        
+        # CRITICAL FIX: Use 'phone_number' not 'phone'
+        phone = normalize_phone(str(row.get('phone_number', '')))
         if not phone or len(phone) < 10:
             continue
             
@@ -182,7 +191,7 @@ def apply_phone_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
             if idx == idx2 or pd.notna(row2.get('cluster_id')):
                 continue
                 
-            phone2 = normalize_phone(str(row2.get('phone', '')))
+            phone2 = normalize_phone(str(row2.get('phone_number', '')))
             
             if phone == phone2:
                 if pd.isna(row.get('cluster_id')):
@@ -207,7 +216,7 @@ def apply_email_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
             continue
             
         email = str(row.get('email', '')).lower().strip()
-        if not email or '@' not in email:
+        if not email or '@' not in email or email == 'nan':
             continue
             
         for idx2, row2 in df.iterrows():
@@ -238,12 +247,13 @@ def merge_duplicate_clusters(df: pd.DataFrame) -> List[Dict]:
     
     # Process clustered records
     clustered = df[df['cluster_id'].notna()]
-    for cluster_id in clustered['cluster_id'].unique():
-        cluster_records = clustered[clustered['cluster_id'] == cluster_id]
-        merged_record = merge_cluster_records(cluster_records)
-        merged_record['cluster_id'] = cluster_id
-        merged_record['duplicate_count'] = len(cluster_records)
-        merged_records.append(merged_record)
+    if not clustered.empty:
+        for cluster_id in clustered['cluster_id'].unique():
+            cluster_records = clustered[clustered['cluster_id'] == cluster_id]
+            merged_record = merge_cluster_records(cluster_records)
+            merged_record['cluster_id'] = cluster_id
+            merged_record['duplicate_count'] = len(cluster_records)
+            merged_records.append(merged_record)
     
     # Add non-clustered records (unique records)
     unique_records = df[df['cluster_id'].isna()]
@@ -264,15 +274,25 @@ def merge_cluster_records(cluster_df: pd.DataFrame) -> Dict:
     """
     merged = {}
     
-    # Priority fields (take first non-empty)
-    priority_fields = ['id', 'name', 'address', 'city', 'state', 'zip', 
-                      'phone', 'email', 'website', 'place_id']
+    # CRITICAL FIX: Map database fields to output fields correctly
+    field_mappings = {
+        'id': 'id',
+        'name': 'name',
+        'address': 'address',
+        'city': 'city',
+        'state': 'state',
+        'zip': 'zip',
+        'phone_number': 'phone',  # Map phone_number to phone
+        'email': 'email',
+        'open_website': 'website',  # Map open_website to website
+        'place_id': 'place_id'
+    }
     
-    for field in priority_fields:
+    for db_field, output_field in field_mappings.items():
         for _, row in cluster_df.iterrows():
-            value = row.get(field)
+            value = row.get(db_field)
             if value and str(value).strip() and str(value).lower() not in ['nan', 'none']:
-                merged[field] = value
+                merged[output_field] = value
                 break
     
     # Average confidence score
@@ -306,9 +326,10 @@ def names_are_similar(name1: str, name2: str) -> bool:
     if name1 == name2:
         return True
     
-    # Check if one is contained in the other
-    if name1 in name2 or name2 in name1:
-        return True
+    # Check if one is contained in the other (with length check)
+    if len(name1) > 3 and len(name2) > 3:
+        if name1 in name2 or name2 in name1:
+            return True
     
     # Check for common variations
     variations = [
