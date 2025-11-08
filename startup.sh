@@ -15,6 +15,11 @@ echo ""
 echo "🔍 All relevant environment variables:"
 env | grep -E "GOOGLE|SUPABASE|SPREADSHEET" | head -10
 
+# Pre-import required Python modules to avoid import errors
+echo ""
+echo "📦 Pre-loading Python modules..."
+python -c "import json; import base64; print('✅ Modules loaded successfully')"
+
 # Run the main pipeline
 echo ""
 echo "📊 Starting main pipeline..."
