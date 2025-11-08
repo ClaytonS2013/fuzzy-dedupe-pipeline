@@ -252,16 +252,29 @@ class AdvancedAIDeduplicator:
         """Create comprehensive text for semantic embedding"""
         parts = []
         
-        # Primary identifiers
-        if not pd.isna(row.get('Practice Name')):
-            name = self.normalize_text(str(row['Practice Name']))
+        # Handle both possible column names for name
+        name_col = None
+        if 'Practice Name' in row.index:
+            name_col = 'Practice Name'
+        elif 'name' in row.index:
+            name_col = 'name'
+        
+        if name_col and not pd.isna(row.get(name_col)):
+            name = self.normalize_text(str(row[name_col]))
             parts.append(f"business name: {name}")
         
-        # Location information
-        if not pd.isna(row.get('Practice Address')):
-            addr = self.normalize_address(str(row['Practice Address']))
+        # Handle both possible column names for address
+        addr_col = None
+        if 'Practice Address' in row.index:
+            addr_col = 'Practice Address'
+        elif 'address' in row.index:
+            addr_col = 'address'
+        
+        if addr_col and not pd.isna(row.get(addr_col)):
+            addr = self.normalize_address(str(row[addr_col]))
             parts.append(f"address: {addr}")
         
+        # Handle other location fields
         if not pd.isna(row.get('City')):
             parts.append(f"city: {str(row['City']).lower()}")
         
@@ -277,11 +290,17 @@ class AdvancedAIDeduplicator:
             if phone:
                 parts.append(f"phone: {phone}")
         
-        # Business type/category if available
-        if not pd.isna(row.get('Practice Type')):
-            parts.append(f"type: {str(row['Practice Type']).lower()}")
+        # Business type/category
+        type_col = None
+        if 'Practice Type' in row.index:
+            type_col = 'Practice Type'
+        elif 'category' in row.index:
+            type_col = 'category'
         
-        # Website for additional context
+        if type_col and not pd.isna(row.get(type_col)):
+            parts.append(f"type: {str(row[type_col]).lower()}")
+        
+        # Website
         if not pd.isna(row.get('open_website')):
             website = str(row['open_website']).lower()
             # Extract domain name
@@ -296,8 +315,15 @@ class AdvancedAIDeduplicator:
         """Create specialized text for address embedding"""
         parts = []
         
-        if not pd.isna(row.get('Practice Address')):
-            parts.append(self.normalize_address(str(row['Practice Address'])))
+        # Handle both possible column names for address
+        addr_col = None
+        if 'Practice Address' in row.index:
+            addr_col = 'Practice Address'
+        elif 'address' in row.index:
+            addr_col = 'address'
+        
+        if addr_col and not pd.isna(row.get(addr_col)):
+            parts.append(self.normalize_address(str(row[addr_col])))
         
         if not pd.isna(row.get('City')):
             parts.append(str(row['City']).lower())
@@ -368,8 +394,18 @@ class AdvancedAIDeduplicator:
         address_index = self.build_faiss_index(address_emb)
         
         # Prepare normalized data for additional checks
-        df['norm_phone'] = df['phone_number'].apply(self.normalize_phone)
-        df['norm_name'] = df['Practice Name'].apply(self.normalize_text)
+        # Handle both possible column names
+        name_col = 'Practice Name' if 'Practice Name' in df.columns else 'name' if 'name' in df.columns else None
+        
+        if name_col:
+            df['norm_name'] = df[name_col].apply(self.normalize_text)
+        else:
+            df['norm_name'] = ''
+        
+        if 'phone_number' in df.columns:
+            df['norm_phone'] = df['phone_number'].apply(self.normalize_phone)
+        else:
+            df['norm_phone'] = ''
         
         # Track processed pairs to avoid duplicates
         processed_pairs = set()
@@ -425,8 +461,8 @@ class AdvancedAIDeduplicator:
                     details['reason'] = f'High semantic similarity: {sem_score:.3f}'
                 
                 # 2. Strong address match with decent name match
-                elif addr_score >= self.address_threshold:
-                    name_similarity = fuzz.ratio(row_i['norm_name'], row_j['norm_name']) / 100
+                elif addr_score >= self.address_threshold and df['norm_name'].iloc[i] and df['norm_name'].iloc[j]:
+                    name_similarity = fuzz.ratio(df['norm_name'].iloc[i], df['norm_name'].iloc[j]) / 100
                     if name_similarity >= 0.6:  # Lower threshold when combined with address
                         is_match = True
                         match_type = 'hybrid'
@@ -435,30 +471,39 @@ class AdvancedAIDeduplicator:
                         details['reason'] = f'Address + name match: {addr_score:.3f} + {name_similarity:.3f}'
                 
                 # 3. Exact phone match
-                if not is_match and row_i['norm_phone'] and row_j['norm_phone']:
-                    if row_i['norm_phone'] == row_j['norm_phone']:
+                if not is_match and df['norm_phone'].iloc[i] and df['norm_phone'].iloc[j]:
+                    if df['norm_phone'].iloc[i] == df['norm_phone'].iloc[j]:
                         is_match = True
                         match_type = 'phone'
                         confidence = 0.95
-                        details['reason'] = f'Exact phone match: {row_i["norm_phone"]}'
+                        details['reason'] = f'Exact phone match: {df["norm_phone"].iloc[i]}'
                 
                 # 4. EPD# exact match
-                if not is_match and not pd.isna(row_i.get('epd#')) and not pd.isna(row_j.get('epd#')):
-                    if str(row_i['epd#']).strip() == str(row_j['epd#']).strip():
+                epd_col = 'epd#' if 'epd#' in row_i.index else 'place_id' if 'place_id' in row_i.index else None
+                if not is_match and epd_col and not pd.isna(row_i.get(epd_col)) and not pd.isna(row_j.get(epd_col)):
+                    if str(row_i[epd_col]).strip() == str(row_j[epd_col]).strip():
                         is_match = True
                         match_type = 'epd'
                         confidence = 0.98
-                        details['reason'] = f'EPD# match: {row_i["epd#"]}'
+                        details['reason'] = f'EPD/Place ID match: {row_i[epd_col]}'
                 
                 if is_match:
+                    # Get the name for logging
+                    if name_col:
+                        name1 = str(row_i.get(name_col, ''))
+                        name2 = str(row_j.get(name_col, ''))
+                    else:
+                        name1 = f"Record {i}"
+                        name2 = f"Record {j}"
+                    
                     match_result = MatchResult(
                         index1=i,
                         index2=j,
                         match_type=match_type,
                         confidence=confidence,
                         details=details,
-                        business1_name=str(row_i.get('Practice Name', '')),
-                        business2_name=str(row_j.get('Practice Name', ''))
+                        business1_name=name1,
+                        business2_name=name2
                     )
                     matches.append(match_result)
                     processed_pairs.add((i, j))
@@ -488,6 +533,10 @@ class AdvancedAIDeduplicator:
         # Start with the first row as base
         merged = dup_rows.iloc[0].copy()
         
+        # Determine which column names we're using
+        name_col = 'Practice Name' if 'Practice Name' in dup_rows.columns else 'name' if 'name' in dup_rows.columns else None
+        addr_col = 'Practice Address' if 'Practice Address' in dup_rows.columns else 'address' if 'address' in dup_rows.columns else None
+        
         # For each field, intelligently select the best value
         for col in dup_rows.columns:
             values = dup_rows[col].dropna()
@@ -495,8 +544,8 @@ class AdvancedAIDeduplicator:
             if len(values) == 0:
                 continue
             
-            if col in ['Practice Name', 'Practice Address']:
-                # For important fields, take the longest (most complete) value
+            # Important fields: take the longest (most complete) value
+            if col == name_col or col == addr_col:
                 unique_normalized = set(self.normalize_text(str(v)) for v in values)
                 if len(unique_normalized) == 1:
                     # All values are essentially the same, take the longest
@@ -509,7 +558,7 @@ class AdvancedAIDeduplicator:
                     else:
                         merged[col] = max(values, key=lambda x: len(str(x)))
             
-            elif col in ['phone_number', 'epd#']:
+            elif col in ['phone_number', 'epd#', 'place_id']:
                 # For identifiers, check consistency
                 unique_values = set(str(v).strip() for v in values)
                 if len(unique_values) == 1:
@@ -584,7 +633,14 @@ class AdvancedAIDeduplicator:
                 merged_record = self.merge_duplicate_records(df, cluster_indices)
                 clean_records.append(merged_record)
                 processed_indices.update(cluster_indices)
-                logger.info(f"✅ Merged {len(cluster_indices)} duplicates: {merged_record['Practice Name']}")
+                
+                # Get name for logging
+                name_col = 'Practice Name' if 'Practice Name' in merged_record.index else 'name' if 'name' in merged_record.index else None
+                if name_col:
+                    name = merged_record[name_col]
+                else:
+                    name = f"Record {cluster_indices[0]}"
+                logger.info(f"✅ Merged {len(cluster_indices)} duplicates: {name}")
             else:
                 # Unique record
                 row_copy = row.copy()
@@ -631,19 +687,14 @@ class AdvancedAIDeduplicator:
 def simple_deduplication(df: pd.DataFrame) -> pd.DataFrame:
     """Simple fallback deduplication using basic fuzzy matching"""
     logger.info("Running simple fallback deduplication")
-    # Keep existing records for now - just add required columns
+    
+    # Keep all existing columns and add required metadata
     df['confidence_score'] = 1.0
     df['merge_count'] = 1
     df['merge_confidence'] = 1.0
     df['merge_date'] = datetime.now().isoformat()
     
-    # Add field mappings
-    if 'phone_number' in df.columns and 'phone' not in df.columns:
-        df['phone'] = df['phone_number']
-    
-    if 'open_website' in df.columns and 'website' not in df.columns:
-        df['website'] = df['open_website']
-    
+    # No actual deduplication in simple mode - just return all records
     return df
 
 
@@ -687,13 +738,6 @@ def run_deduplication_with_ai(df: pd.DataFrame, use_ai: bool = True) -> pd.DataF
             # Run deduplication
             clean_df, stats = dedup.deduplicate(df)
             
-            # Ensure field mappings are correct for output
-            if 'phone_number' in clean_df.columns and 'phone' not in clean_df.columns:
-                clean_df['phone'] = clean_df['phone_number']
-            
-            if 'open_website' in clean_df.columns and 'website' not in clean_df.columns:
-                clean_df['website'] = clean_df['open_website']
-            
             # Add confidence score if not present
             if 'confidence_score' not in clean_df.columns:
                 clean_df['confidence_score'] = clean_df.get('merge_confidence', 1.0)
@@ -734,7 +778,20 @@ def run_deduplication(supabase_client) -> int:
     # Convert to DataFrame
     df = pd.DataFrame(records)
     
-    # Run AI deduplication - CALL THE RENAMED FUNCTION
+    # Map column names from Google Sheets format to expected format
+    # This handles the mismatch between sheet columns and database columns
+    column_mapping = {
+        'name': 'Practice Name',
+        'address': 'Practice Address',
+        'category': 'Practice Type'
+    }
+    
+    # Apply column mapping if needed
+    for sheet_col, db_col in column_mapping.items():
+        if sheet_col in df.columns and db_col not in df.columns:
+            df[db_col] = df[sheet_col]
+    
+    # Run AI deduplication
     clean_df = run_deduplication_with_ai(df, use_ai=True)
     
     # Clear existing dedupe_results
@@ -742,6 +799,25 @@ def run_deduplication(supabase_client) -> int:
     
     # Insert deduplicated results
     dedupe_results = clean_df.to_dict('records')
-    supabase_client.table('dedupe_results').insert(dedupe_results).execute()
+    
+    # Remove any columns that might cause issues with Supabase
+    columns_to_remove = ['canonical', 'norm_name', 'norm_phone']
+    for record in dedupe_results:
+        for col in columns_to_remove:
+            record.pop(col, None)
+    
+    try:
+        supabase_client.table('dedupe_results').insert(dedupe_results).execute()
+    except Exception as e:
+        logger.error(f"Error inserting dedupe results: {e}")
+        # Try again with minimal columns if it fails
+        minimal_results = []
+        for record in dedupe_results:
+            minimal_record = {k: v for k, v in record.items() 
+                            if k in ['Practice Name', 'Practice Address', 'City', 'State', 'Zip', 
+                                   'phone_number', 'open_website', 'confidence_score', 
+                                   'merge_count', 'merge_confidence', 'merge_date']}
+            minimal_results.append(minimal_record)
+        supabase_client.table('dedupe_results').insert(minimal_results).execute()
     
     return len(clean_df)
