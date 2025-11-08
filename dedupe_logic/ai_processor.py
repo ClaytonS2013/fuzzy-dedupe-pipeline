@@ -224,12 +224,3 @@ Return ONLY the merged record as valid JSON, no other text."""
                     merged[key] = value
         merged['merge_method'] = 'simple'
         return merged
-```
-
----
-
-### **📁 `models/.gitkeep`** (NEW)
-```
-# This directory stores AI model files
-# Models are downloaded automatically on first use
-# Add actual model files to .gitignore
