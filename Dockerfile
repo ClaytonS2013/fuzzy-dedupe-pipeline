@@ -1,35 +1,24 @@
+# Build stage
+FROM python:3.10-slim as builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ python3-dev
+
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+# Runtime stage
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    python3-dev \
-    build-essential \
-    cmake \
-    wget \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+# Copy only the installed packages from builder
+COPY --from=builder /root/.local /root/.local
+COPY . .
 
-# Copy requirements file
-COPY requirements.txt /app/
+# Make sure scripts in .local are usable
+ENV PATH=/root/.local/bin:$PATH
 
-# Install Python dependencies with specific sentence-transformers version
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir --upgrade sentence-transformers==3.0.1 faiss-cpu==1.7.4 && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . /app/
-
-# Create necessary directories
-RUN mkdir -p /app/models /app/logs /app/data /app/config /app/database
-
-# Set environment variables for Python
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# Run the pipeline
 CMD ["python", "main.py"]
