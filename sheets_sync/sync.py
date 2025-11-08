@@ -16,7 +16,7 @@ def sync_sheets_to_supabase(sheets_client, supabase_client) -> int:
     Returns number of records processed
     """
     try:
-        logger.info("Starting Google Sheets to Supabase sync...")
+        logger.info("📥 Starting Google Sheets → Supabase sync...")
         
         # Get spreadsheet ID from environment
         spreadsheet_id = os.getenv('SPREADSHEET_ID')
@@ -28,14 +28,14 @@ def sync_sheets_to_supabase(sheets_client, supabase_client) -> int:
         
         # Get all records
         records = worksheet.get_all_records()
-        logger.info(f"Found {len(records)} rows in {sheet_name}")
+        logger.info(f"📊 Found {len(records)} rows in {sheet_name}")
         
         if not records:
-            logger.warning("No records found in sheet")
+            logger.warning("⚠️ No records found in sheet")
             return 0
         
         # Clear existing records in Supabase
-        logger.info("Clearing existing practice_records...")
+        logger.info("🗑️ Clearing existing practice_records...")
         supabase_client.table('practice_records').delete().neq('id', 0).execute()
         
         # Prepare records for insertion
@@ -56,18 +56,19 @@ def sync_sheets_to_supabase(sheets_client, supabase_client) -> int:
                 try:
                     response = supabase_client.table('practice_records').insert(transformed_batch).execute()
                     total_inserted += len(transformed_batch)
-                    logger.info(f"Inserted batch {i//batch_size + 1}: {len(transformed_batch)} records")
+                    logger.info(f"✅ Inserted batch {i//batch_size + 1}: {len(transformed_batch)} records")
                 except Exception as e:
-                    logger.error(f"Failed to insert batch {i//batch_size + 1}: {str(e)}")
+                    logger.error(f"❌ Failed to insert batch {i//batch_size + 1}: {str(e)}")
+                    # Log sample record structure for debugging
                     if records:
-                        logger.error(f"Sample record structure: {list(records[0].keys())}")
+                        logger.error(f"🔍 Sample record structure: {list(records[0].keys())}")
                     raise
         
-        logger.info(f"Sheets to Supabase sync completed: {total_inserted} records")
+        logger.info(f"✅ Sheets → Supabase sync completed: {total_inserted} records")
         return total_inserted
         
     except Exception as e:
-        logger.error(f"Sheets to Supabase sync failed: {str(e)}")
+        logger.error(f"❌ Sheets → Supabase sync failed: {str(e)}")
         raise
 
 def transform_record_for_db(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,7 +133,7 @@ def transform_record_for_db(record: Dict[str, Any]) -> Dict[str, Any]:
         return transformed
         
     except Exception as e:
-        logger.error(f"Failed to transform record: {str(e)}")
+        logger.error(f"❌ Failed to transform record: {str(e)}")
         logger.error(f"   Record: {record}")
         return None
 
@@ -142,17 +143,17 @@ def sync_supabase_to_sheets(supabase_client, sheets_client) -> int:
     Returns number of records written
     """
     try:
-        logger.info("Starting Supabase to Google Sheets writeback...")
+        logger.info("📤 Starting Supabase → Google Sheets writeback...")
         
         # Fetch dedupe results
-        logger.info("Fetching dedupe_results from Supabase...")
+        logger.info("🔍 Fetching dedupe_results from Supabase...")
         response = supabase_client.table('dedupe_results').select("*").execute()
         results = response.data
         
-        logger.info(f"Found {len(results)} dedupe results")
+        logger.info(f"📊 Found {len(results)} dedupe results")
         
         if not results:
-            logger.warning("No dedupe results found")
+            logger.warning("⚠️ No dedupe results found")
             return 0
         
         # Get spreadsheet
@@ -162,10 +163,10 @@ def sync_supabase_to_sheets(supabase_client, sheets_client) -> int:
         # Get or create Clean Data worksheet
         try:
             worksheet = spreadsheet.worksheet('Clean Data')
-            logger.info("Clearing Clean Data worksheet...")
+            logger.info("🗑️ Clearing Clean Data worksheet...")
             worksheet.clear()
         except:
-            logger.info("Creating Clean Data worksheet...")
+            logger.info("📝 Creating Clean Data worksheet...")
             worksheet = spreadsheet.add_worksheet(title='Clean Data', rows=1000, cols=20)
         
         # Prepare headers
@@ -183,13 +184,13 @@ def sync_supabase_to_sheets(supabase_client, sheets_client) -> int:
             data_rows.append(row)
         
         # Write to sheet
-        logger.info(f"Writing {len(data_rows)} rows to Clean Data worksheet...")
+        logger.info(f"✍️ Writing {len(data_rows)} rows to Clean Data worksheet...")
         worksheet.update('A1', data_rows)
         
-        logger.info(f"Supabase to Google Sheets writeback completed: {len(results)} records")
+        logger.info(f"✅ Supabase → Google Sheets writeback completed: {len(results)} records")
         return len(results)
         
     except Exception as e:
-        logger.error(f"Supabase to Google Sheets writeback failed: {str(e)}")
+        logger.error(f"❌ Supabase → Google Sheets writeback failed: {str(e)}")
         logger.error(f"   Traceback: {traceback.format_exc()}")
         raise
