@@ -5,6 +5,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ENVIRONMENT=production
-      - ENABLE_AI_FEATURES=true  # ADD THIS
-      - AI_MODEL_CACHE=/app/models  # ADD THIS
+      - ENABLE_AI_FEATURES=true        # ADD THIS
+      - AI_MODEL_CACHE=/app/models     # ADD THIS
       - TRANSFORMERS_CACHE=/app/models  # ADD THIS
+    
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models  # ADD THIS
+      - ./config:/app/config  # ADD THIS
