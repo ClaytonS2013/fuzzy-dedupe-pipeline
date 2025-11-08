@@ -1,230 +1,410 @@
 """
-AI Enhancement Module for Fuzzy Dedupe Pipeline
-Provides semantic matching and Claude AI validation
+Deduplication Processor Module
+Handles the core deduplication logic for the pipeline
 """
 
-import os
-import json
 import logging
-import numpy as np
+import json
 from typing import List, Dict, Tuple, Optional
+from datetime import datetime
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-class AIDedupeProcessor:
-    def __init__(self):
-        """Initialize AI components"""
-        self.components = self._initialize_components()
-        self.config = self._load_config()
-        
-    def _load_config(self):
-        """Load AI configuration"""
-        config_path = '/app/config/ai_config.json'
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        return {
-            'ai_features': {
-                'similarity_threshold': 0.80
-            }
-        }
+def run_deduplication(supabase_client) -> int:
+    """
+    Main deduplication function that processes records from practice_records table
     
-    def _initialize_components(self):
-        """Initialize available AI components"""
-        components = {}
+    Args:
+        supabase_client: Initialized Supabase client
+    
+    Returns:
+        int: Number of unique records after deduplication
+    """
+    try:
+        logger.info("🔍 Starting deduplication process...")
         
-        # Try to load sentence transformers
-        try:
-            from sentence_transformers import SentenceTransformer
-            model_name = 'all-MiniLM-L6-v2'
-            cache_dir = '/app/models'
-            os.makedirs(cache_dir, exist_ok=True)
-            components['embedder'] = SentenceTransformer(model_name, cache_folder=cache_dir)
-            logger.info(f"✅ Sentence transformer model loaded: {model_name}")
-        except Exception as e:
-            logger.error(f"❌ Failed to load sentence transformers: {e}")
-            components['embedder'] = None
+        # Fetch all records from practice_records
+        logger.info("📥 Fetching records from practice_records...")
+        result = supabase_client.table('practice_records').select("*").execute()
         
-        # Try to load FAISS
-        try:
-            import faiss
-            components['faiss'] = faiss
-            logger.info("✅ FAISS loaded for vector search")
-        except Exception as e:
-            logger.error(f"❌ Failed to load FAISS: {e}")
-            components['faiss'] = None
+        if not result.data:
+            logger.warning("⚠️ No records found in practice_records table")
+            return 0
+            
+        records = result.data
+        logger.info(f"📊 Found {len(records)} records to process")
         
-        # Try to load Anthropic
-        api_key = os.getenv('ANTHROPIC_API_KEY')
-        if api_key and not api_key.startswith('sk-ant-your'):
-            try:
-                from anthropic import Anthropic
-                components['claude'] = Anthropic(api_key=api_key)
-                logger.info("✅ Claude AI initialized")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize Claude: {e}")
-                components['claude'] = None
+        # Convert to DataFrame for easier processing
+        df = pd.DataFrame(records)
+        
+        # Perform deduplication
+        dedupe_results = deduplicate_records(df)
+        
+        # Save results to dedupe_results table
+        if dedupe_results:
+            logger.info(f"💾 Saving {len(dedupe_results)} unique records to dedupe_results...")
+            
+            # Clear existing results
+            supabase_client.table('dedupe_results').delete().neq('id', 0).execute()
+            
+            # Insert new results
+            supabase_client.table('dedupe_results').insert(dedupe_results).execute()
+            logger.info("✅ Deduplication results saved successfully")
+            
+        return len(dedupe_results)
+        
+    except Exception as e:
+        logger.error(f"❌ Deduplication failed: {str(e)}")
+        raise
+
+
+def deduplicate_records(df: pd.DataFrame) -> List[Dict]:
+    """
+    Core deduplication logic using multiple matching strategies
+    
+    Args:
+        df: DataFrame containing records to deduplicate
+    
+    Returns:
+        List of deduplicated records
+    """
+    logger.info("🔄 Processing duplicates...")
+    
+    # Initialize cluster tracking
+    cluster_id = 1
+    df['cluster_id'] = None
+    df['confidence_score'] = 100.0
+    df['duplicate_count'] = 1
+    
+    # Strategy 1: Exact name matching (case-insensitive)
+    df = apply_name_matching(df, cluster_id)
+    # Fix for cluster_id increment
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
+    
+    # Strategy 2: Address matching
+    df = apply_address_matching(df, cluster_id)
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
+    
+    # Strategy 3: Phone number matching
+    df = apply_phone_matching(df, cluster_id)
+    if df['cluster_id'].notna().any():
+        max_cluster = df['cluster_id'].dropna().str.extract(r'(\d+)').astype(float).max().iloc[0]
+        cluster_id = int(max_cluster) + 1 if not pd.isna(max_cluster) else cluster_id
+    
+    # Strategy 4: Email domain matching
+    df = apply_email_matching(df, cluster_id)
+    
+    # Group by cluster and merge
+    merged_records = merge_duplicate_clusters(df)
+    
+    logger.info(f"✅ Reduced {len(df)} records to {len(merged_records)} unique records")
+    
+    return merged_records
+
+
+def apply_name_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
+    """Apply name-based duplicate detection"""
+    cluster_id = start_cluster
+    
+    for idx, row in df.iterrows():
+        if pd.notna(row.get('cluster_id')):
+            continue
+            
+        name = str(row.get('name', '')).lower().strip()
+        if not name or name == 'nan':
+            continue
+            
+        # Find similar names
+        for idx2, row2 in df.iterrows():
+            if idx == idx2 or pd.notna(row2.get('cluster_id')):
+                continue
+                
+            name2 = str(row2.get('name', '')).lower().strip()
+            
+            # Check for exact match or common variations
+            if names_are_similar(name, name2):
+                if pd.isna(row.get('cluster_id')):
+                    df.at[idx, 'cluster_id'] = f'cluster_{cluster_id}'
+                    df.at[idx, 'confidence_score'] = 95.0
+                
+                df.at[idx2, 'cluster_id'] = f'cluster_{cluster_id}'
+                df.at[idx2, 'confidence_score'] = 95.0
+        
+        if pd.notna(df.at[idx, 'cluster_id']):
+            cluster_id += 1
+    
+    return df
+
+
+def apply_address_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
+    """Apply address-based duplicate detection"""
+    cluster_id = start_cluster
+    
+    for idx, row in df.iterrows():
+        if pd.notna(row.get('cluster_id')):
+            continue
+            
+        address = normalize_address(str(row.get('address', '')))
+        if not address:
+            continue
+            
+        for idx2, row2 in df.iterrows():
+            if idx == idx2 or pd.notna(row2.get('cluster_id')):
+                continue
+                
+            address2 = normalize_address(str(row2.get('address', '')))
+            
+            if address == address2:
+                if pd.isna(row.get('cluster_id')):
+                    df.at[idx, 'cluster_id'] = f'cluster_{cluster_id}'
+                    df.at[idx, 'confidence_score'] = 90.0
+                
+                df.at[idx2, 'cluster_id'] = f'cluster_{cluster_id}'
+                df.at[idx2, 'confidence_score'] = 90.0
+        
+        if pd.notna(df.at[idx, 'cluster_id']):
+            cluster_id += 1
+    
+    return df
+
+
+def apply_phone_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
+    """Apply phone number-based duplicate detection"""
+    cluster_id = start_cluster
+    
+    for idx, row in df.iterrows():
+        if pd.notna(row.get('cluster_id')):
+            continue
+        
+        # CRITICAL FIX: Use 'phone_number' not 'phone'
+        phone = normalize_phone(str(row.get('phone_number', '')))
+        if not phone or len(phone) < 10:
+            continue
+            
+        for idx2, row2 in df.iterrows():
+            if idx == idx2 or pd.notna(row2.get('cluster_id')):
+                continue
+                
+            phone2 = normalize_phone(str(row2.get('phone_number', '')))
+            
+            if phone == phone2:
+                if pd.isna(row.get('cluster_id')):
+                    df.at[idx, 'cluster_id'] = f'cluster_{cluster_id}'
+                    df.at[idx, 'confidence_score'] = 98.0
+                
+                df.at[idx2, 'cluster_id'] = f'cluster_{cluster_id}'
+                df.at[idx2, 'confidence_score'] = 98.0
+        
+        if pd.notna(df.at[idx, 'cluster_id']):
+            cluster_id += 1
+    
+    return df
+
+
+def apply_email_matching(df: pd.DataFrame, start_cluster: int) -> pd.DataFrame:
+    """Apply email-based duplicate detection"""
+    cluster_id = start_cluster
+    
+    for idx, row in df.iterrows():
+        if pd.notna(row.get('cluster_id')):
+            continue
+            
+        email = str(row.get('email', '')).lower().strip()
+        if not email or '@' not in email or email == 'nan':
+            continue
+            
+        for idx2, row2 in df.iterrows():
+            if idx == idx2 or pd.notna(row2.get('cluster_id')):
+                continue
+                
+            email2 = str(row2.get('email', '')).lower().strip()
+            
+            if email == email2:
+                if pd.isna(row.get('cluster_id')):
+                    df.at[idx, 'cluster_id'] = f'cluster_{cluster_id}'
+                    df.at[idx, 'confidence_score'] = 99.0
+                
+                df.at[idx2, 'cluster_id'] = f'cluster_{cluster_id}'
+                df.at[idx2, 'confidence_score'] = 99.0
+        
+        if pd.notna(df.at[idx, 'cluster_id']):
+            cluster_id += 1
+    
+    return df
+
+
+def merge_duplicate_clusters(df: pd.DataFrame) -> List[Dict]:
+    """
+    Merge records within the same cluster, keeping the most complete information
+    """
+    merged_records = []
+    
+    # Process clustered records
+    clustered = df[df['cluster_id'].notna()]
+    if not clustered.empty:
+        for cluster_id in clustered['cluster_id'].unique():
+            cluster_records = clustered[clustered['cluster_id'] == cluster_id]
+            merged_record = merge_cluster_records(cluster_records)
+            merged_record['cluster_id'] = cluster_id
+            merged_record['duplicate_count'] = len(cluster_records)
+            merged_records.append(merged_record)
+    
+    # Add non-clustered records (unique records)
+    unique_records = df[df['cluster_id'].isna()]
+    for _, record in unique_records.iterrows():
+        record_dict = record.to_dict()
+        record_dict['cluster_id'] = f'unique_{len(merged_records) + 1}'
+        record_dict['duplicate_count'] = 1
+        record_dict['confidence_score'] = 100.0
+        merged_records.append(clean_record(record_dict))
+    
+    return merged_records
+
+
+def merge_cluster_records(cluster_df: pd.DataFrame) -> Dict:
+    """
+    Merge multiple records from the same cluster into one
+    Priority: Keep the most complete and recent information
+    """
+    merged = {}
+    
+    # CRITICAL FIX: Map database fields to output fields correctly
+    field_mappings = {
+        'id': 'id',
+        'name': 'name',
+        'address': 'address',
+        'city': 'city',
+        'state': 'state',
+        'zip': 'zip',
+        'phone_number': 'phone',  # Map phone_number to phone
+        'email': 'email',
+        'open_website': 'website',  # Map open_website to website
+        'place_id': 'place_id'
+    }
+    
+    for db_field, output_field in field_mappings.items():
+        for _, row in cluster_df.iterrows():
+            value = row.get(db_field)
+            if value and str(value).strip() and str(value).lower() not in ['nan', 'none']:
+                merged[output_field] = value
+                break
+    
+    # Average confidence score
+    merged['confidence_score'] = cluster_df['confidence_score'].mean()
+    
+    return clean_record(merged)
+
+
+def clean_record(record: Dict) -> Dict:
+    """Clean and format a record for output"""
+    cleaned = {}
+    
+    # Define the fields we want to keep in the output
+    output_fields = ['id', 'name', 'address', 'city', 'state', 'zip',
+                    'phone', 'email', 'website', 'cluster_id', 
+                    'confidence_score', 'duplicate_count']
+    
+    for field in output_fields:
+        value = record.get(field)
+        if value is not None and str(value).lower() not in ['nan', 'none', '']:
+            cleaned[field] = value
         else:
-            components['claude'] = None
-            logger.info("ℹ️ Claude AI not configured (no valid API key)")
-        
-        return components
+            cleaned[field] = None
     
-    def is_available(self) -> bool:
-        """Check if AI features are available"""
-        return any(self.components.values())
+    return cleaned
+
+
+def names_are_similar(name1: str, name2: str) -> bool:
+    """Check if two names are similar enough to be duplicates"""
+    # Exact match
+    if name1 == name2:
+        return True
     
-    def get_status(self) -> Dict[str, bool]:
-        """Get status of AI components"""
-        return {
-            'embeddings': self.components.get('embedder') is not None,
-            'faiss': self.components.get('faiss') is not None,
-            'claude': self.components.get('claude') is not None
-        }
+    # Check if one is contained in the other (with length check)
+    if len(name1) > 3 and len(name2) > 3:
+        if name1 in name2 or name2 in name1:
+            return True
     
-    def compute_semantic_similarity(self, text1: str, text2: str) -> float:
-        """Compute semantic similarity between two texts"""
-        if not self.components.get('embedder'):
-            return 0.0
-        
-        try:
-            embeddings = self.components['embedder'].encode([text1, text2])
-            # Cosine similarity
-            similarity = np.dot(embeddings[0], embeddings[1]) / (
-                np.linalg.norm(embeddings[0]) * np.linalg.norm(embeddings[1])
-            )
-            return float(similarity)
-        except Exception as e:
-            logger.error(f"Similarity computation error: {e}")
-            return 0.0
+    # Check for common variations
+    variations = [
+        ('test', ''),  # Remove 'test' suffix for test data
+        ('inc', 'incorporated'),
+        ('corp', 'corporation'),
+        ('llc', ''),
+        ('ltd', 'limited'),
+        ('.', ''),
+        (',', ''),
+        ('&', 'and')
+    ]
     
-    def find_semantic_duplicates(self, records: List[Dict]) -> List[Tuple[int, int, float]]:
-        """Find semantically similar records using embeddings"""
-        if not self.components.get('embedder') or not self.components.get('faiss'):
-            logger.warning("AI components not available for semantic matching")
-            return []
-        
-        logger.info(f"🔍 Finding semantic duplicates in {len(records)} records...")
-        
-        # Create text representations
-        texts = []
-        for record in records:
-            text = f"{record.get('name', '')} {record.get('address', '')} {record.get('city', '')}"
-            texts.append(text)
-        
-        # Generate embeddings
-        logger.info("Generating embeddings...")
-        embeddings = self.components['embedder'].encode(texts, show_progress_bar=False)
-        embeddings_np = np.array(embeddings).astype('float32')
-        
-        # Build FAISS index
-        dimension = embeddings_np.shape[1]
-        index = self.components['faiss'].IndexFlatL2(dimension)
-        index.add(embeddings_np)
-        
-        # Find similar pairs
-        threshold = self.config['ai_features']['similarity_threshold']
-        duplicates = []
-        k = min(5, len(records))  # Search top-5 similar
-        
-        for i, embedding in enumerate(embeddings_np):
-            distances, indices = index.search(embedding.reshape(1, -1), k)
-            
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx != i and idx > i:  # Avoid self and duplicates
-                    # Convert L2 distance to similarity
-                    similarity = 1 / (1 + dist)
-                    if similarity > threshold:
-                        duplicates.append((i, idx, similarity))
-                        logger.info(f"  🎯 Semantic match found: {texts[i][:50]} ↔ {texts[idx][:50]} ({similarity:.2%})")
-        
-        logger.info(f"✅ Found {len(duplicates)} semantic duplicate pairs")
-        return duplicates
+    clean1 = name1
+    clean2 = name2
     
-    def validate_with_claude(self, record1: Dict, record2: Dict, similarity: float) -> Dict:
-        """Use Claude AI to validate if records are truly duplicates"""
-        if not self.components.get('claude'):
-            return {
-                'is_duplicate': similarity > 0.85,
-                'confidence': similarity,
-                'method': 'threshold'
-            }
-        
-        try:
-            prompt = f"""Analyze if these two records represent the same entity:
-
-Record 1:
-{json.dumps(record1, indent=2)}
-
-Record 2:
-{json.dumps(record2, indent=2)}
-
-Similarity Score: {similarity:.2%}
-
-Respond with JSON only (no other text):
-{{"is_duplicate": true_or_false, "confidence": 0.0_to_1.0, "reason": "brief_explanation"}}"""
-
-            response = self.components['claude'].messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=200,
-                temperature=0.1,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            result_text = response.content[0].text.strip()
-            result = json.loads(result_text)
-            result['method'] = 'claude_ai'
-            logger.info(f"🤖 Claude validation: {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Claude validation error: {e}")
-            return {
-                'is_duplicate': similarity > 0.85,
-                'confidence': similarity,
-                'method': 'threshold',
-                'error': str(e)
-            }
+    for old, new in variations:
+        clean1 = clean1.replace(old, new)
+        clean2 = clean2.replace(old, new)
     
-    def smart_merge(self, records: List[Dict]) -> Dict:
-        """Intelligently merge duplicate records"""
-        if not records:
-            return {}
-        
-        if self.components.get('claude'):
-            try:
-                prompt = f"""Merge these duplicate records into one, keeping the most complete and accurate information:
-
-Records to merge:
-{json.dumps(records, indent=2)}
-
-Return ONLY the merged record as valid JSON, no other text."""
-
-                response = self.components['claude'].messages.create(
-                    model="claude-3-sonnet-20240229",
-                    max_tokens=500,
-                    temperature=0.1,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                merged_text = response.content[0].text.strip()
-                merged = json.loads(merged_text)
-                merged['merge_method'] = 'claude_ai'
-                logger.info("🤖 AI-powered merge completed")
-                return merged
-                
-            except Exception as e:
-                logger.error(f"AI merge error: {e}")
-        
-        # Fallback to simple merge
-        merged = {}
-        for record in records:
-            for key, value in record.items():
-                if value and (key not in merged or not merged[key]):
-                    merged[key] = value
-        merged['merge_method'] = 'simple'
-        return merged
+    clean1 = ' '.join(clean1.split())
+    clean2 = ' '.join(clean2.split())
+    
+    return clean1 == clean2
 
 
-# Create an alias for backward compatibility
-AIProcessor = AIDedupeProcessor
+def normalize_address(address: str) -> str:
+    """Normalize address for comparison"""
+    if not address:
+        return ''
+    
+    address = address.lower().strip()
+    
+    # Common replacements
+    replacements = {
+        'street': 'st',
+        'avenue': 'ave',
+        'road': 'rd',
+        'drive': 'dr',
+        'lane': 'ln',
+        'court': 'ct',
+        'place': 'pl',
+        'boulevard': 'blvd',
+        'north': 'n',
+        'south': 's',
+        'east': 'e',
+        'west': 'w'
+    }
+    
+    for old, new in replacements.items():
+        address = address.replace(old, new)
+    
+    # Remove extra spaces
+    address = ' '.join(address.split())
+    
+    return address
+
+
+def normalize_phone(phone: str) -> str:
+    """Normalize phone number for comparison"""
+    if not phone:
+        return ''
+    
+    # Remove all non-numeric characters
+    phone = ''.join(c for c in phone if c.isdigit())
+    
+    # Remove country code if present (1 for US)
+    if len(phone) == 11 and phone.startswith('1'):
+        phone = phone[1:]
+    
+    return phone
+
+
+# Main entry point for backwards compatibility
+def process_duplicates(records: List[Dict]) -> List[Dict]:
+    """Legacy function for compatibility"""
+    df = pd.DataFrame(records)
+    return deduplicate_records(df)
