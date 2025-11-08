@@ -1,16 +1,33 @@
+version: '3.8'
+
 services:
   fuzzy-dedupe:
-    # ... existing config ...
+    build: .
+    container_name: fuzzy-dedupe-pipeline
     
     environment:
       - PYTHONUNBUFFERED=1
       - ENVIRONMENT=production
-      - ENABLE_AI_FEATURES=true        # ADD THIS
-      - AI_MODEL_CACHE=/app/models     # ADD THIS
-      - TRANSFORMERS_CACHE=/app/models  # ADD THIS
+      - ENABLE_AI_FEATURES=true
+      - AI_MODEL_CACHE=/app/models
+      - TRANSFORMERS_CACHE=/app/models
+      - GOOGLE_CREDENTIALS=${GOOGLE_CREDENTIALS}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SPREADSHEET_ID=${SPREADSHEET_ID}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./models:/app/models  # ADD THIS
-      - ./config:/app/config  # ADD THIS
+      - ./models:/app/models
+      - ./config:/app/config
+    
+    restart: unless-stopped
+    
+    networks:
+      - dedupe-network
+
+networks:
+  dedupe-network:
+    driver: bridge
