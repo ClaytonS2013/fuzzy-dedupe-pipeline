@@ -1,33 +1,44 @@
-version: '3.8'
+# Dockerfile for AI-Enhanced Deduplication Pipeline
+# Optimized for Railway Hobby plan (no size constraints)
 
-services:
-  fuzzy-dedupe:
-    build: .
-    container_name: fuzzy-dedupe-pipeline
-    
-    environment:
-      - PYTHONUNBUFFERED=1
-      - ENVIRONMENT=production
-      - ENABLE_AI_FEATURES=true
-      - AI_MODEL_CACHE=/app/models
-      - TRANSFORMERS_CACHE=/app/models
-      - GOOGLE_CREDENTIALS=${GOOGLE_CREDENTIALS}
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - SPREADSHEET_ID=${SPREADSHEET_ID}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-    
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models:/app/models
-      - ./config:/app/config
-    
-    restart: unless-stopped
-    
-    networks:
-      - dedupe-network
+FROM python:3.10
 
-networks:
-  dedupe-network:
-    driver: bridge
+WORKDIR /app
+
+# Install system dependencies for ML libraries
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    python3-dev \
+    build-essential \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies with caching
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Pre-download the sentence transformer models to include in image
+# This avoids downloading them at runtime
+RUN python -c "from sentence_transformers import SentenceTransformer; \
+    SentenceTransformer('all-mpnet-base-v2'); \
+    SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Copy application code
+COPY main.py .
+COPY sheets_sync/ ./sheets_sync/
+COPY dedupe_logic/ ./dedupe_logic/
+COPY database/ ./database/
+
+# Set Python to run in unbuffered mode for better logging
+ENV PYTHONUNBUFFERED=1
+
+# Optimize torch for CPU if GPU not available
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+
+# Run the application
+CMD ["python", "main.py"]
