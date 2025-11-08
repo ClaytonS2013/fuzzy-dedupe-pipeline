@@ -1,53 +1,35 @@
-ARG PYTHON_VERSION=3.10
+FROM python:3.10-slim
 
-FROM python:${PYTHON_VERSION}-slim as builder
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc g++ python3-dev build-essential cmake wget git && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN pip install --upgrade pip setuptools wheel
-
-COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install --no-cache-dir --upgrade sentence-transformers==3.0.1 faiss-cpu==1.7.4
-
-# Verify AI packages
-RUN python -c "import sentence_transformers; import faiss; print('✅ AI packages installed')"
-
-FROM python:${PYTHON_VERSION}-slim
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libgomp1 libglib2.0-0 ca-certificates curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN useradd -m -u 1000 appuser
 WORKDIR /app
 
-COPY --chown=appuser:appuser . .
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    python3-dev \
+    build-essential \
+    cmake \
+    wget \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app/models /app/logs /app/data /app/config /app/database && \
-    chown -R appuser:appuser /app && \
-    if [ -f startup.sh ]; then chmod +x startup.sh; fi && \
-    if [ -f fix_ai.sh ]; then chmod +x fix_ai.sh; fi
+# Copy requirements file
+COPY requirements.txt /app/
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app \
-    TRANSFORMERS_CACHE=/app/models
+# Install Python dependencies with specific sentence-transformers version
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir --upgrade sentence-transformers==3.0.1 faiss-cpu==1.7.4 && \
+    pip install --no-cache-dir -r requirements.txt
 
-USER appuser
+# Copy application code
+COPY . /app/
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import sentence_transformers, faiss; print('AI OK')"
+# Create necessary directories
+RUN mkdir -p /app/models /app/logs /app/data /app/config /app/database
 
-CMD ["/bin/bash", "-c", "if [ -f ./startup.sh ]; then ./startup.sh; else python main.py; fi"]
+# Set environment variables for Python
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Run the pipeline
+CMD ["python", "main.py"]
