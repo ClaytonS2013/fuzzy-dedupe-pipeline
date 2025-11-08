@@ -1,307 +1,223 @@
 """
-Fuzzy Matching Deduplication Pipeline - Main Entry Point
-FINAL VERSION: All imports fixed, error handling improved
+Fuzzy Matching Pipeline - Main Entry Point
+Connects Google Sheets to Supabase with deduplication
 """
 
 import os
 import sys
 import json
 import base64
-import time
 import logging
-import traceback
-import requests
 from datetime import datetime
-
-# Import these before using them
-try:
-    from supabase import create_client, Client
-except ImportError as e:
-    print(f"ERROR: Failed to import supabase: {e}")
-    print("Installing supabase...")
-    os.system("pip install supabase")
-    from supabase import create_client, Client
-
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except ImportError as e:
-    print(f"ERROR: Failed to import Google libraries: {e}")
-    print("Installing required packages...")
-    os.system("pip install gspread google-auth google-auth-oauthlib")
-    import gspread
-    from google.oauth2.service_account import Credentials
+import traceback
+from google.oauth2 import service_account
+import gspread
+from supabase import create_client, Client
+from typing import Optional, Dict, Any, List
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
+logger = logging.getLogger(__name__)
 
-# Import sheets_sync module
-try:
-    from sheets_sync.sync import sync_sheets_to_supabase, sync_supabase_to_sheets
-except ImportError as e:
-    logging.error(f"❌ Failed to import sheets_sync module: {e}")
-    sync_sheets_to_supabase = None
-    sync_supabase_to_sheets = None
-
-# Environment variables
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
-SPREADSHEET_ID = os.environ.get('SPREADSHEET_ID')
-GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
-
-def init_google_sheets_client():
-    """Initialize Google Sheets client with credentials"""
-    try:
-        if not GOOGLE_CREDENTIALS:
-            raise ValueError("GOOGLE_CREDENTIALS environment variable is not set")
-            
-        # Debug log
-        logging.info(f"📝 GOOGLE_CREDENTIALS length: {len(GOOGLE_CREDENTIALS)}")
-        
-        # Parse credentials from environment variable
-        creds_dict = None
-        if GOOGLE_CREDENTIALS.startswith('{'):
-            # It's JSON string
-            logging.info("📄 Parsing as JSON string...")
-            creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        else:
-            # It's base64 encoded
-            logging.info("🔐 Decoding base64 credentials...")
-            try:
-                creds_json = base64.b64decode(GOOGLE_CREDENTIALS).decode('utf-8')
-                creds_dict = json.loads(creds_json)
-                logging.info("✅ Successfully decoded base64 credentials")
-            except Exception as decode_error:
-                logging.error(f"❌ Failed to decode base64: {decode_error}")
-                raise
-        
-        if not creds_dict:
-            raise ValueError("Failed to parse credentials")
-            
-        # Create credentials object
-        logging.info("🔑 Creating credentials object...")
-        creds = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/spreadsheets', 
-                   'https://www.googleapis.com/auth/drive']
-        )
-        
-        # Authorize and return client
-        logging.info("🔗 Authorizing with Google...")
-        client = gspread.authorize(creds)
-        logging.info("✅ Google Sheets client initialized successfully")
-        return client
-        
-    except json.JSONDecodeError as e:
-        logging.error(f"❌ JSON decode error: {e}")
-        logging.error(f"   First 100 chars: {GOOGLE_CREDENTIALS[:100]}...")
-        raise
-    except Exception as e:
-        logging.error(f"❌ Failed to initialize Google Sheets client: {e}")
-        logging.error(f"   Error type: {type(e).__name__}")
-        logging.error(f"   Traceback: {traceback.format_exc()}")
-        raise
-
-def init_supabase_client():
-    """Initialize Supabase client"""
-    try:
-        if not SUPABASE_URL or not SUPABASE_KEY:
-            raise ValueError(f"Missing Supabase credentials. URL: {SUPABASE_URL}, KEY: {'set' if SUPABASE_KEY else 'not set'}")
-        
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logging.info("✅ Supabase client initialized successfully")
-        return supabase
-    except Exception as e:
-        logging.error(f"❌ Failed to initialize Supabase client: {e}")
-        raise
-
-def log_pipeline_stage(stage_name, status, records_processed=0, error_message=None, duration_ms=None):
-    """Log pipeline execution to Supabase dedupe_log table"""
-    try:
-        if not SUPABASE_URL or not SUPABASE_KEY:
-            logging.warning("⚠️ Cannot log to Supabase: credentials not available")
-            return
-            
-        log_data = {
-            "stage_name": stage_name,
-            "status": status,
-            "start_time": datetime.now().isoformat(),
-            "end_time": datetime.now().isoformat() if status in ["success", "failed"] else None,
-            "records_processed": records_processed,
-            "error_message": error_message,
-            "duration_ms": duration_ms
-        }
-        
-        # Remove None values to avoid issues
-        log_data = {k: v for k, v in log_data.items() if v is not None}
-        
-        # Debug output
-        logging.info(f"🔍 DEBUG - Logging to dedupe_log: {json.dumps(log_data, indent=2)}")
-        
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        
-        response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/dedupe_log",
-            headers=headers,
-            json=log_data
-        )
-        
-        if response.status_code >= 400:
-            logging.warning(f"⚠️ Failed to log stage {stage_name} to dedupe_log: {response.status_code} {response.reason}")
-            logging.warning(f"🔍 DEBUG - Response content: {response.text}")
-        else:
-            logging.info(f"✅ Successfully logged stage {stage_name} to dedupe_log")
-        
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to log stage {stage_name} to dedupe_log: {str(e)}")
-
-def run_pipeline():
-    """Run the complete data pipeline"""
-    start_time = time.time()
-    
-    logging.info("🚀 Fuzzy Matching Antelligence Pipeline Starting")
-    logging.info("============================================================")
-    
-    # Verify environment variables
+def check_environment_variables() -> bool:
+    """Verify all required environment variables are set"""
+    required_vars = ['GOOGLE_CREDENTIALS', 'SPREADSHEET_ID', 'SUPABASE_URL', 'SUPABASE_KEY']
     missing_vars = []
-    if not SUPABASE_URL:
-        missing_vars.append("SUPABASE_URL")
-    if not SUPABASE_KEY:
-        missing_vars.append("SUPABASE_KEY")
-    if not SPREADSHEET_ID:
-        missing_vars.append("SPREADSHEET_ID")
-    if not GOOGLE_CREDENTIALS:
-        missing_vars.append("GOOGLE_CREDENTIALS")
+    
+    for var in required_vars:
+        if not os.getenv(var):
+            missing_vars.append(var)
+            logger.error(f"❌ {var} is not set!")
     
     if missing_vars:
-        logging.error(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
-        logging.error("Pipeline cannot proceed without these variables")
+        logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
+        return False
+    
+    logger.info("✅ Environment variables verified")
+    logger.info(f"   SUPABASE_URL: {os.getenv('SUPABASE_URL')[:40]}...")
+    logger.info(f"   SPREADSHEET_ID: {os.getenv('SPREADSHEET_ID')}")
+    logger.info(f"   GOOGLE_CREDENTIALS length: {len(os.getenv('GOOGLE_CREDENTIALS', ''))}")
+    
+    return True
+
+def init_google_sheets_client():
+    """Initialize Google Sheets client with service account credentials"""
+    try:
+        logger.info("📝 GOOGLE_CREDENTIALS length: %d", len(os.getenv('GOOGLE_CREDENTIALS', '')))
+        
+        # Decode base64 credentials
+        logger.info("🔐 Decoding base64 credentials...")
+        creds_base64 = os.getenv('GOOGLE_CREDENTIALS')
+        creds_json = base64.b64decode(creds_base64).decode('utf-8')
+        logger.info("✅ Successfully decoded base64 credentials")
+        
+        # Parse JSON
+        service_account_info = json.loads(creds_json)
+        
+        # Create credentials
+        logger.info("🔑 Creating credentials object...")
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        
+        # Authorize client
+        logger.info("🔗 Authorizing with Google...")
+        client = gspread.authorize(credentials)
+        logger.info("✅ Google Sheets client initialized successfully")
+        return client
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Google Sheets client: {str(e)}")
+        logger.error(f"   Error type: {type(e).__name__}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        raise
+
+def init_supabase_client() -> Client:
+    """Initialize Supabase client"""
+    try:
+        url = os.getenv('SUPABASE_URL')
+        key = os.getenv('SUPABASE_KEY')
+        client = create_client(url, key)
+        logger.info("✅ Supabase client initialized successfully")
+        return client
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Supabase client: {str(e)}")
+        raise
+
+def run_pipeline():
+    """Main pipeline orchestration"""
+    start_time = datetime.now()
+    
+    # Check environment
+    if not check_environment_variables():
+        logger.error("❌ Environment check failed")
         return
     
-    logging.info("✅ Environment variables verified")
-    logging.info(f"   SUPABASE_URL: {SUPABASE_URL[:30]}...")
-    logging.info(f"   SPREADSHEET_ID: {SPREADSHEET_ID}")
-    logging.info(f"   GOOGLE_CREDENTIALS length: {len(GOOGLE_CREDENTIALS)}")
+    logger.info("\n🔧 Initializing clients...")
     
     # Initialize clients
-    sheets_client = None
-    supabase_client = None
-    
     try:
-        logging.info("\n🔧 Initializing clients...")
         sheets_client = init_google_sheets_client()
         supabase_client = init_supabase_client()
-        logging.info("✅ All clients initialized successfully\n")
+        logger.info("✅ All clients initialized successfully")
     except Exception as e:
-        logging.error(f"❌ Failed to initialize clients: {e}")
-        logging.error(f"   Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ Failed to initialize clients: {str(e)}")
         return
     
+    # Import pipeline stages
+    from sheets_sync.sync import sync_sheets_to_supabase, sync_supabase_to_sheets
+    from dedupe_logic.processor import run_deduplication
+    
+    # Log to dedupe_log table
+    def log_stage(stage_name: str, status: str, start: datetime, end: datetime = None, 
+                  records: int = 0, error: str = None):
+        try:
+            end = end or datetime.now()
+            duration_ms = int((end - start).total_seconds() * 1000)
+            
+            log_entry = {
+                "stage_name": stage_name,
+                "status": status,
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+                "records_processed": records,
+                "duration_ms": duration_ms
+            }
+            
+            if error:
+                log_entry["error_message"] = error
+            
+            logger.info(f"🔍 DEBUG - Logging to dedupe_log: {json.dumps(log_entry, indent=2)}")
+            
+            response = supabase_client.table('dedupe_log').insert(log_entry).execute()
+            logger.info(f"✅ Successfully logged stage {stage_name} to dedupe_log")
+        except Exception as e:
+            logger.error(f"❌ Failed to log stage {stage_name}: {str(e)}")
+    
     # Stage 1: Google Sheets → Supabase
-    logging.info("============================================================")
-    logging.info("📥 STAGE 1: Google Sheets → Supabase Sync")
-    logging.info("============================================================")
+    logger.info("=" * 60)
+    logger.info("📥 STAGE 1: Google Sheets → Supabase Sync")
+    logger.info("=" * 60)
     
-    stage1_start = time.time()
-    if sync_sheets_to_supabase and sheets_client and supabase_client:
-        try:
-            records_processed = sync_sheets_to_supabase(sheets_client, supabase_client)
-            stage1_duration = int((time.time() - stage1_start) * 1000)
-            logging.info("============================================================")
-            logging.info(f"✅ Stage 1 Complete: Synced {records_processed} records (took {stage1_duration} ms)")
-            logging.info("============================================================")
-            log_pipeline_stage("sheets_to_supabase", "success", records_processed, duration_ms=stage1_duration)
-        except Exception as e:
-            stage1_duration = int((time.time() - stage1_start) * 1000)
-            error_msg = str(e)
-            logging.error("============================================================")
-            logging.error(f"❌ Stage 1 Failed: {error_msg}")
-            logging.error(f"   Traceback: {traceback.format_exc()}")
-            logging.error("============================================================")
-            logging.error("Pipeline will continue but data may be stale")
-            log_pipeline_stage("sheets_to_supabase", "failed", 0, error_msg, stage1_duration)
-    else:
-        logging.error("============================================================")
-        logging.error("❌ Stage 1 Failed: sheets_sync module or clients not available")
-        logging.error("============================================================")
+    stage_start = datetime.now()
+    try:
+        records_processed = sync_sheets_to_supabase(sheets_client, supabase_client)
+        stage_end = datetime.now()
+        duration = int((stage_end - stage_start).total_seconds() * 1000)
+        logger.info("=" * 60)
+        logger.info(f"✅ Stage 1 Complete: {records_processed} records synced (took {duration} ms)")
+        logger.info("=" * 60)
+        log_stage("sheets_to_supabase", "success", stage_start, stage_end, records_processed)
+    except Exception as e:
+        logger.error("=" * 60)
+        logger.error(f"❌ Stage 1 Failed: {str(e)}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        logger.error("=" * 60)
+        logger.error("Pipeline will continue but data may be stale")
+        log_stage("sheets_to_supabase", "failed", stage_start, error=str(e))
     
-    # Stage 2: Deduplication
-    logging.info("")
-    logging.info("============================================================")
-    logging.info("🧹 STAGE 2: Dedupe Processing")
-    logging.info("============================================================")
+    # Stage 2: Dedupe Processing
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("🧹 STAGE 2: Dedupe Processing")
+    logger.info("=" * 60)
     
-    stage2_start = time.time()
-    if supabase_client:
-        try:
-            from dedupe_logic.processor import run_deduplication
-            records_processed = run_deduplication(supabase_client)
-            stage2_duration = int((time.time() - stage2_start) * 1000)
-            logging.info("============================================================")
-            logging.info(f"✅ Stage 2 Complete: Processed {records_processed} records (took {stage2_duration} ms)")
-            logging.info("============================================================")
-            log_pipeline_stage("dedupe", "success", records_processed, duration_ms=stage2_duration)
-        except ImportError as e:
-            logging.warning(f"⚠️ Skipping Stage 2: Dedupe module not available - {e}")
-            log_pipeline_stage("dedupe", "skipped", 0, f"Dedupe module not available: {e}")
-        except Exception as e:
-            stage2_duration = int((time.time() - stage2_start) * 1000)
-            error_msg = str(e)
-            logging.error(f"❌ Stage 2 Failed: {error_msg}")
-            logging.error(f"   Traceback: {traceback.format_exc()}")
-            log_pipeline_stage("dedupe", "failed", 0, error_msg, stage2_duration)
-    else:
-        logging.error("❌ Stage 2 Skipped: Supabase client not available")
+    stage_start = datetime.now()
+    try:
+        dedupe_count = run_deduplication(supabase_client)
+        stage_end = datetime.now()
+        duration = int((stage_end - stage_start).total_seconds() * 1000)
+        logger.info("=" * 60)
+        logger.info(f"✅ Stage 2 Complete: Processed {dedupe_count} records (took {duration} ms)")
+        logger.info("=" * 60)
+        log_stage("dedupe", "success", stage_start, stage_end, dedupe_count)
+    except Exception as e:
+        logger.error(f"❌ Stage 2 Failed: {str(e)}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        log_stage("dedupe", "failed", stage_start, error=str(e))
     
     # Stage 3: Supabase → Google Sheets
-    logging.info("")
-    logging.info("============================================================")
-    logging.info("📤 STAGE 3: Supabase → Google Sheets Writeback")
-    logging.info("============================================================")
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("📤 STAGE 3: Supabase → Google Sheets Writeback")
+    logger.info("=" * 60)
     
-    stage3_start = time.time()
-    if sync_supabase_to_sheets and sheets_client and supabase_client:
-        try:
-            records_processed = sync_supabase_to_sheets(sheets_client, supabase_client)
-            stage3_duration = int((time.time() - stage3_start) * 1000)
-            logging.info("============================================================")
-            logging.info(f"✅ Stage 3 Complete: Wrote {records_processed} rows to Google Sheets (took {stage3_duration} ms)")
-            logging.info("============================================================")
-            log_pipeline_stage("supabase_to_sheets", "success", records_processed, duration_ms=stage3_duration)
-        except Exception as e:
-            stage3_duration = int((time.time() - stage3_start) * 1000)
-            error_msg = str(e)
-            logging.error(f"❌ Stage 3 Failed: {error_msg}")
-            logging.error(f"   Traceback: {traceback.format_exc()}")
-            log_pipeline_stage("supabase_to_sheets", "failed", 0, error_msg, stage3_duration)
-    else:
-        logging.error("============================================================")
-        logging.error("❌ Stage 3 Failed: sheets_sync module or clients not available")
-        logging.error("============================================================")
+    stage_start = datetime.now()
+    try:
+        records_written = sync_supabase_to_sheets(supabase_client, sheets_client)
+        stage_end = datetime.now()
+        duration = int((stage_end - stage_start).total_seconds() * 1000)
+        logger.info("=" * 60)
+        logger.info(f"✅ Stage 3 Complete: Wrote {records_written} rows to Google Sheets (took {duration} ms)")
+        logger.info("=" * 60)
+        log_stage("supabase_to_sheets", "success", stage_start, stage_end, records_written)
+    except Exception as e:
+        logger.error(f"❌ Stage 3 Failed: {str(e)}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        log_stage("supabase_to_sheets", "failed", stage_start, error=str(e))
     
-    # Pipeline complete
-    total_duration = int((time.time() - start_time) * 1000)
-    logging.info("")
-    logging.info("============================================================")
-    logging.info(f"🏁 Pipeline Finished - Total time: {total_duration}ms")
-    logging.info("============================================================")
+    # Final summary
+    total_time = int((datetime.now() - start_time).total_seconds() * 1000)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info(f"🏁 Pipeline Finished - Total time: {total_time}ms")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
-    # Print startup message
-    print("🚀 Starting Fuzzy Matching Pipeline...")
-    print("==================================")
+    logger.info("🚀 Fuzzy Matching Antelligence Pipeline Starting")
+    logger.info("=" * 60)
+    
     try:
         run_pipeline()
+        logger.info("✅ Pipeline completed successfully!")
     except Exception as e:
-        print(f"❌ Pipeline crashed: {e}")
-        print(f"   Traceback: {traceback.format_exc()}")
+        logger.error(f"❌ Pipeline failed: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         sys.exit(1)
