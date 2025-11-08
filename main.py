@@ -38,6 +38,9 @@ GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
 def init_google_sheets_client():
     """Initialize Google Sheets client with credentials"""
     try:
+        if not GOOGLE_CREDENTIALS:
+            raise ValueError("GOOGLE_CREDENTIALS environment variable is not set")
+            
         # Parse credentials from environment variable
         if GOOGLE_CREDENTIALS.startswith('{'):
             # It's JSON string
