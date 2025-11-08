@@ -22,8 +22,8 @@ python-json-logger==2.0.7
 # Claude AI for intelligent validation
 anthropic==0.18.1
 
-# Semantic similarity with embeddings
-sentence-transformers==2.2.2
+# Semantic similarity with embeddings - UPDATED VERSION
+sentence-transformers==3.0.1  # Changed from 2.2.2
 faiss-cpu==1.7.4
 
 # Machine learning
