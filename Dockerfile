@@ -14,7 +14,7 @@ RUN pip install --upgrade pip setuptools wheel
 
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install --no-cache-dir --upgrade sentence-transformers==2.2.2 faiss-cpu==1.7.4
+    pip install --no-cache-dir --upgrade sentence-transformers==3.0.1 faiss-cpu==1.7.4
 
 # Verify AI packages
 RUN python -c "import sentence_transformers; import faiss; print('✅ AI packages installed')"
