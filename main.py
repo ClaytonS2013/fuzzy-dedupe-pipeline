@@ -6,6 +6,7 @@ FIXED: Proper client initialization and function calls
 import os
 import sys
 import json
+import base64
 import time
 import logging
 import requests
@@ -44,11 +45,9 @@ def init_google_sheets_client():
         # Parse credentials from environment variable
         if GOOGLE_CREDENTIALS.startswith('{'):
             # It's JSON string
-            import json
             creds_dict = json.loads(GOOGLE_CREDENTIALS)
         else:
             # It might be base64 encoded
-            import base64
             creds_json = base64.b64decode(GOOGLE_CREDENTIALS).decode('utf-8')
             creds_dict = json.loads(creds_json)
         
